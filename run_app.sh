@@ -8,4 +8,4 @@ source venv/bin/activate
 echo "Installing dependencies..."
 pip install -r requirements.txt
 echo "Starting app..."
-streamlit run app.py --server.headless true --browser.gatherUsageStats false
+streamlit run app.py --server.port 8501 --server.headless true --browser.gatherUsageStats false

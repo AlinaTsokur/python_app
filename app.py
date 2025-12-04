@@ -76,23 +76,25 @@ st.markdown("""
             border: 1px solid rgba(255, 255, 255, 0.05);
         }
 
-        /* 5. ВКЛАДКИ (Tabs) */
+        /* 5. ВКЛАДКИ (Tabs) - CLEAN TEXT ONLY */
         .stTabs [data-baseweb="tab-list"] {
-            background-color: rgba(255, 255, 255, 0.05);
-            border-radius: 30px;
-            padding: 4px;
-            gap: 5px;
+            background-color: transparent !important;
+            gap: 20px;
         }
         .stTabs [data-baseweb="tab"] {
-            height: 40px;
-            border-radius: 25px;
-            color: #aaa;
+            height: auto;
+            border-radius: 0;
+            color: #888;
             font-weight: 500;
+            padding-bottom: 5px;
+            border: none;
+            background-color: transparent !important;
         }
         .stTabs [aria-selected="true"] {
-            background-color: rgba(255, 255, 255, 0.1) !important;
+            background-color: transparent !important;
             color: white !important;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+            font-weight: 700;
+            border-bottom: 2px solid #ff4b4b; /* Optional: keep the red underline or remove it if they want purely text */
         }
 
         /* 6. КРАСНЫЙ БЕЙДЖ ТАЙМФРЕЙМА */
@@ -492,8 +494,8 @@ tab1, tab2, tab3 = st.tabs(["Отчеты", "Уровни", "БД Свечи"])
 
 # --- ВКЛАДКА 1: ОТЧЕТЫ ---
 with tab1:
-    st.markdown("### 📦 Пакетная Загрузка Свечей")
-    st.markdown("Вставьте одну или несколько свечей (из буфера Tampermonkey).")
+    st.markdown("### 📦 Загрузка Свечей")
+
     
     def split_candle_input(text):
         exchanges = ["Binance", "Bybit", "OKX", "Bitget", "Coinbase", "Kraken", "KuCoin", "HTX", "Gate.io", "MEXC", "BingX"]
@@ -501,9 +503,9 @@ with tab1:
         parts = re.split(pattern, text, flags=re.IGNORECASE)
         return [p.strip() for p in parts if p.strip()]
 
-    with st.form("batch_input_form"):
-        input_text = st.text_area("Ввод данных", height=200, placeholder="Вставьте текст с CoinGlass (можно несколько)...")
-        process_submitted = st.form_submit_button("Распарсить Пакет", type="primary")
+    # Removed st.form to remove the border
+    input_text = st.text_area("Input", label_visibility="collapsed", height=200, placeholder="Вставьте одну или несколько свечей")
+    process_submitted = st.button("Распарсить Пакет", type="primary")
 
     if process_submitted and input_text:
         raw_candles = split_candle_input(input_text)
@@ -610,15 +612,16 @@ avg_trade_sell: {fmt(metrics.get('Avg_Trade_Sell'))}"""
                     st.error(f"#{i+1}: Ошибка парсинга.")
 
         st.subheader("📊 Генерация Отчетов")
-        if st.button("🔬 Показать X-RAY Отчеты"):
+        if st.button("🔬 X-RAY Отчет"):
             full_report = ""
             for item in valid_candles:
                 full_report += f"--- REPORT FOR {item['data']['symbol']} ---\n{item['report']}\n\n"
-            st.text_area("📝 X-RAY Batch Report", value=full_report, height=600)
+            st.markdown("### 📝 X-RAY Batch Report")
+            st.code(full_report, language='yaml')
 
         st.divider()
         st.subheader("💾 Сохранение")
-        if st.button("Сохранить ВСЕ валидные свечи в базу", type="primary"):
+        if st.button("Сохранить ВСЕ свечи в базу", type="primary"):
             saved_count = 0; errors = []
             progress_bar = st.progress(0)
             for i, item in enumerate(valid_candles):
