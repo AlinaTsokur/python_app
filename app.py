@@ -1,27 +1,34 @@
 import streamlit as st
 import re
 import pandas as pd
-import os
 import uuid
 from datetime import datetime, time
-import thresholds  # Файл thresholds.py должен быть в той же папке
+from supabase import create_client, Client
 
 # --- Настройка страницы ---
 st.set_page_config(
     page_title="VANTA Black",
     page_icon="🖤",
-    layout="centered",
+    layout="wide",
     initial_sidebar_state="collapsed"
 )
 
-# --- Константы ---
-LEVELS_FILE = "levels.csv"
-CANDLES_FILE = "candles.csv"
+# --- 🔌 Подключение к Supabase ---
+@st.cache_resource
+def init_connection():
+    try:
+        url = st.secrets["SUPABASE_URL"]
+        key = st.secrets["SUPABASE_KEY"]
+        return create_client(url, key)
+    except Exception as e:
+        st.error(f"❌ Ошибка подключения к Supabase: {e}")
+        st.stop()
 
-# --- 🎨 CSS: ПРЕМИУМ ДИЗАЙН (MESH GRADIENT + GLASS) ---
+supabase: Client = init_connection()
+
+# --- 🎨 CSS: PREMIUM DESIGN ---
 st.markdown("""
     <style>
-        /* 1. СЛОЖНЫЙ ЖИВОЙ ФОН (Mesh Gradient) */
         .stApp {
             background-color: #0e1117;
             background-image: 
@@ -32,684 +39,775 @@ st.markdown("""
             background-attachment: fixed;
             color: #E0E0E0;
         }
-
-        /* 2. НАСТОЯЩЕЕ ЖИДКОЕ СТЕКЛО (Glassmorphism) */
         [data-testid="stVerticalBlockBorderWrapper"] > div {
-            /* Почти прозрачный фон, чтобы было видно размытие сзади */
             background: rgba(255, 255, 255, 0.03) !important; 
-            
-            /* Сильное размытие фона под карточкой */
             backdrop-filter: blur(20px) !important;
-            -webkit-backdrop-filter: blur(20px) !important;
-            
-            /* Тонкая светящаяся рамка */
             border: 1px solid rgba(255, 255, 255, 0.08) !important;
-            border-top: 1px solid rgba(255, 255, 255, 0.15) !important; /* Сверху чуть ярче (блик) */
-            
+            border-top: 1px solid rgba(255, 255, 255, 0.15) !important;
             border-radius: 20px !important;
             box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.4) !important;
             margin-bottom: 24px;
             padding: 24px !important;
         }
-
-        /* 3. ПОЛЯ ВВОДА (Интеграция в дизайн) */
         .stTextInput input, .stNumberInput input, .stDateInput input, .stTextArea textarea {
             background-color: rgba(0, 0, 0, 0.3) !important;
             color: white !important;
             border: 1px solid rgba(255, 255, 255, 0.1) !important;
             border-radius: 10px !important;
-            transition: border 0.3s ease;
         }
-        .stTextInput input:focus, .stNumberInput input:focus, .stTextArea textarea:focus {
-            border: 1px solid rgba(255, 255, 255, 0.4) !important;
-            box-shadow: 0 0 10px rgba(255, 255, 255, 0.1);
-        }
-        
-        /* Скрываем степперы */
-        [data-testid=stNumberInputStepDown], [data-testid=stNumberInputStepUp] { display: none; }
-
-        /* 4. ТАБЛИЦЫ (DataFrame) */
         [data-testid="stDataFrame"] {
             background: rgba(0, 0, 0, 0.2);
             border-radius: 12px;
             padding: 10px;
-            border: 1px solid rgba(255, 255, 255, 0.05);
         }
-
-        /* 5. ВКЛАДКИ (Tabs) - CLEAN TEXT ONLY */
-        .stTabs [data-baseweb="tab-list"] {
-            background-color: transparent !important;
-            gap: 20px;
-        }
-        .stTabs [data-baseweb="tab"] {
-            height: auto;
-            border-radius: 0;
-            color: #888;
-            font-weight: 500;
-            padding-bottom: 5px;
-            border: none;
-            background-color: transparent !important;
-        }
-        .stTabs [aria-selected="true"] {
-            background-color: transparent !important;
-            color: white !important;
-            font-weight: 700;
-            border-bottom: 2px solid #ff4b4b; /* Optional: keep the red underline or remove it if they want purely text */
-        }
-
-        /* 6. КРАСНЫЙ БЕЙДЖ ТАЙМФРЕЙМА */
         .tf-badge {
             background: linear-gradient(135deg, #ff4b4b, #d10000);
-            color: white;
-            padding: 3px 10px;
-            border-radius: 12px;
-            font-size: 0.85em;
-            font-weight: 700;
-            margin-left: 8px;
+            color: white; padding: 3px 10px; border-radius: 12px;
+            font-size: 0.85em; font-weight: 700; margin-left: 8px;
             border: 1px solid rgba(255,255,255,0.2);
-            box-shadow: 0 2px 8px rgba(255, 75, 75, 0.3);
-        }
-        
-        /* Заголовки */
-        h1, h2, h3 {
-            color: #ffffff;
-            font-weight: 700;
-            text-shadow: 0 2px 10px rgba(0,0,0,0.5);
         }
     </style>
 """, unsafe_allow_html=True)
 
-# --- Вспомогательные функции ---
+# --- ⚙️ Загрузка конфигураций из БД ---
+@st.cache_data(ttl=300)
+def load_configurations():
+    """Загружает параметры чувствительности, коэффициенты и пороги из Supabase."""
+    config = {}
+    try:
+        # 1. Asset Coeffs (Column: asset, coeff)
+        res_ac = supabase.table('asset_coeffs').select("*").execute()
+        config['asset_coeffs'] = {row['asset']: row['coeff'] for row in res_ac.data} if res_ac.data else {}
 
-def load_levels():
-    if os.path.exists(LEVELS_FILE):
-        return pd.read_csv(LEVELS_FILE)
-    return pd.DataFrame(columns=["Symbol", "Price", "Type", "Note"])
+        # 2. Porog DOI (Column: tf, btc, eth...)
+        res_porog = supabase.table('porog_doi').select("*").execute()
+        if res_porog.data:
+            df = pd.DataFrame(res_porog.data)
+            if 'tf' in df.columns:
+                df = df.rename(columns={'tf': 'timeframe'})
+            config['porog_doi'] = df
+        else:
+            config['porog_doi'] = pd.DataFrame()
 
-def save_levels(df):
-    df.to_csv(LEVELS_FILE, index=False)
+        # 3. TF Params (Column: tf, k_set, k_ctr...)
+        res_tf = supabase.table('tf_params').select("*").execute()
+        config['tf_params'] = {row['tf']: row for row in res_tf.data} if res_tf.data else {}
 
-def load_candles():
-    if os.path.exists(CANDLES_FILE):
-        return pd.read_csv(CANDLES_FILE)
+        # 4. Liqshare Thresholds
+        res_liq = supabase.table('liqshare_thresholds').select("*").eq('name', 'squeeze').execute()
+        config['global_squeeze_limit'] = float(res_liq.data[0]['value']) if res_liq.data else 0.3
+
+        return config
+    except Exception as e:
+        st.error(f"Ошибка загрузки конфигураций из БД: {e}")
+        return None
+
+# --- 🛠 Хелперы Парсинга ---
+def parse_value_raw(val_str):
+    """Парсит строки с K, M, B, %, запятыми в float."""
+    if not val_str or val_str == '-' or val_str == '': return 0.0
     
-    columns = [
-        "Date", "Time", "Symbol", "Asset", "Timeframe", "Note", "Exchange",
-        "Open", "High", "Low", "Close", "Volume", 
-        "Change_Abs", "Change_Pct", "Amplitude_Abs", "Range_Pct",
-        "Price_Sign", "Body_Pct", "Body_Label", "Color",
-        "Upper_Tail_Pct", "Lower_Tail_Pct", "CLV_Pct", "Close_Pos", "Dominant_Reject",
-        "Vol_Buy", "Vol_Sell", "Vol_Delta", "Trade_Buy", "Trade_Sell", "Trade_Delta",
-        "ABV_Ratio_Pct", "Trades_Ratio_Pct",
-        "Avg_Trade_Buy", "Avg_Trade_Sell", "Tilt_Pct", 
-        "CVD_Pct", "CVD_Sign", "CVD_Small", "Implied_Price",
-        "OI_Open", "OI_High", "OI_Low", "OI_Close", "OI_Units",
-        "DOI_Pct", "POROG_DOI_Pct", "r_Strength", "Signal_Strength", "epsilon", "OE",
-        "OI_Pos", "OI_Path", "OI_Flow", 
-        "OI_In_Sens", "OI_Set", "OI_Counter", "OI_Unload",
-        "T_Set", "T_Ctr", "T_Unl",
-        "Liq_Long", "Liq_Short", "LiqShare_Pct", "Limb", "Liq_Squeeze",
-        "DPX", "Price_vs_Delta", "Ratio_Stable", 
-        "Geo_Score", "Flow_Score", "Liq_Penalty", "RQ_Calculated",
-        "X-RAY Report", "Raw_Data"
-    ]
-    return pd.DataFrame(columns=columns)
-
-def save_candles(df):
-    df.to_csv(CANDLES_FILE, index=False)
-
-def fmt(val):
-    if val is None or val == '-' or val == '': return '-'
-    try:
-        f_val = float(val)
-        return "{:.2f}".format(f_val)
-    except:
-        return str(val)
-
-def parse_value(val_str):
-    if not val_str or val_str == '-': return None
-    clean_str = val_str.replace(',', '')
-    suffix = clean_str[-1].upper()
-    multiplier = 1
-    if suffix in ['K', 'M', 'B']:
-        if suffix == 'K': multiplier = 1000
-        elif suffix == 'M': multiplier = 1_000_000
-        elif suffix == 'B': multiplier = 1_000_000_000
+    clean_str = str(val_str).replace(',', '').replace('%', '').strip()
+    multiplier = 1.0
+    
+    if clean_str.upper().endswith('K'):
+        multiplier = 1_000.0
         clean_str = clean_str[:-1]
+    elif clean_str.upper().endswith('M'):
+        multiplier = 1_000_000.0
+        clean_str = clean_str[:-1]
+    elif clean_str.upper().endswith('B'):
+        multiplier = 1_000_000_000.0
+        clean_str = clean_str[:-1]
+        
     try:
+        clean_str = re.sub(r'[^\d.-]', '', clean_str)
         return float(clean_str) * multiplier
-    except ValueError:
-        return None
-
-def parse_float(val_str):
-    if not val_str or val_str == '-': return None
-    try:
-        return float(val_str.replace(',', ''))
     except:
-        return None
+        return 0.0
 
 def extract(regex, text):
-    match = re.search(regex, text)
-    if match: return parse_value(match.group(1))
-    return None
+    # Добавили DOTALL, чтобы искать по всему тексту даже с переносами строк
+    match = re.search(regex, text, re.IGNORECASE | re.DOTALL)
+    if match: return parse_value_raw(match.group(1))
+    return 0.0
 
-# --- ЯДРО РАСЧЕТОВ ---
-def calculate_derived_metrics(data, raw_text=""):
-    metrics = {}
-    try:
-        ohlc = data.get('ohlc', {})
-        O = ohlc.get('Open')
-        H = ohlc.get('High')
-        L = ohlc.get('Low')
-        C = ohlc.get('Close')
-        V = data.get('volume')
-        
-        if None in [O, H, L, C, V] or V == 0: return metrics
-
-        symbol = data.get('symbol', '')
-        metrics['Asset'] = symbol.split(' ')[0].replace('USDT', '').replace('PERP', '')
-
-        metrics['Change_Abs'] = C - O
-        metrics['Change_Pct'] = (metrics['Change_Abs'] / O * 100) if O else 0
-        metrics['Amplitude_Abs'] = H - L
-        metrics['Range_Pct'] = (metrics['Amplitude_Abs'] / C * 100) if C else 0
-        metrics['Price_Sign'] = 1 if C > O else (-1 if C < O else 0)
-        metrics['Color'] = "зелёная" if C >= O else "красная"
-        metrics['Body_Pct'] = (abs(C - O) / metrics['Amplitude_Abs'] * 100) if metrics['Amplitude_Abs'] else 0
-        
-        bp = metrics['Body_Pct']
-        if bp < 5: metrics['Body_Label'] = "доджи"
-        elif bp < 15: metrics['Body_Label'] = "сверхмалое тело"
-        elif bp < 25: metrics['Body_Label'] = "малое тело"
-        elif bp < 50: metrics['Body_Label'] = "среднее- тело"
-        elif bp < 60: metrics['Body_Label'] = "среднее+ тело"
-        elif bp < 80: metrics['Body_Label'] = "крупное тело"
-        elif bp < 95: metrics['Body_Label'] = "очень крупное тело"
-        else: metrics['Body_Label'] = "почти полное (марубозу)"
-
-        metrics['Upper_Tail_Pct'] = ((H - max(O, C)) / metrics['Amplitude_Abs'] * 100) if metrics['Amplitude_Abs'] else 0
-        metrics['Lower_Tail_Pct'] = ((min(O, C) - L) / metrics['Amplitude_Abs'] * 100) if metrics['Amplitude_Abs'] else 0
-        
-        metrics['CLV_Pct'] = ((C - L) / metrics['Amplitude_Abs'] * 100) if metrics['Amplitude_Abs'] else 50
-        
-        clv = metrics['CLV_Pct']
-        if clv <= 5: metrics['Close_Pos'] = "у лоя"
-        elif clv < 20: metrics['Close_Pos'] = "в нижней части диапазона"
-        elif clv < 40: metrics['Close_Pos'] = "ниже середины диапазона"
-        elif clv <= 60: metrics['Close_Pos'] = "в середине диапазона"
-        elif clv <= 80: metrics['Close_Pos'] = "выше середины диапазона"
-        elif clv < 95: metrics['Close_Pos'] = "в верхней части диапазона"
-        else: metrics['Close_Pos'] = "у хая"
-
-        ut, lt, body = metrics['Upper_Tail_Pct'], metrics['Lower_Tail_Pct'], metrics['Body_Pct']
-        dom_rej = "-"
-        if lt >= 3 * body and ut <= 10 and clv >= 85: dom_rej = "bull_Ideal"
-        elif ut >= 3 * body and lt <= 10 and clv <= 15: dom_rej = "bear_Ideal"
-        elif lt >= 2 * body and ut <= 25 and clv >= 75: dom_rej = "bull_Valid"
-        elif ut >= 2 * body and lt <= 25 and clv <= 25: dom_rej = "bear_Valid"
-        elif lt >= 1.5 * body and clv >= 65 and ut <= 0.5 * lt: dom_rej = "bull_Loose"
-        elif ut >= 1.5 * body and clv <= 35 and lt <= 0.5 * ut: dom_rej = "bear_Loose"
-        metrics['Dominant_Reject'] = dom_rej
-
-        vol_m = data.get('vol_metrics', {})
-        trade_m = data.get('trade_metrics', {})
-        
-        metrics['Vol_Buy'] = vol_m.get('Buy')
-        metrics['Vol_Sell'] = abs(vol_m.get('Sell')) if vol_m.get('Sell') is not None else None
-        if vol_m.get('Delta') is not None: metrics['Vol_Delta'] = vol_m.get('Delta')
-        elif metrics['Vol_Buy'] is not None and metrics['Vol_Sell'] is not None: metrics['Vol_Delta'] = metrics['Vol_Buy'] - metrics['Vol_Sell']
-        else: metrics['Vol_Delta'] = None
-
-        metrics['Trade_Buy'] = trade_m.get('Buy')
-        metrics['Trade_Sell'] = abs(trade_m.get('Sell')) if trade_m.get('Sell') is not None else None
-        if trade_m.get('Delta') is not None: metrics['Trade_Delta'] = trade_m.get('Delta')
-        elif metrics['Trade_Buy'] is not None and metrics['Trade_Sell'] is not None: metrics['Trade_Delta'] = metrics['Trade_Buy'] - metrics['Trade_Sell']
-        else: metrics['Trade_Delta'] = None
-        
-        if metrics['Vol_Buy'] is not None and metrics['Vol_Sell'] is not None:
-            denom = metrics['Vol_Buy'] + metrics['Vol_Sell']
-            metrics['ABV_Ratio_Pct'] = ((metrics['Vol_Buy'] - metrics['Vol_Sell']) / denom * 100) if denom else 0
-        else: metrics['ABV_Ratio_Pct'] = 0
-
-        if metrics['Trade_Buy'] is not None and metrics['Trade_Sell'] is not None:
-            denom = metrics['Trade_Buy'] + metrics['Trade_Sell']
-            metrics['Trades_Ratio_Pct'] = ((metrics['Trade_Buy'] - metrics['Trade_Sell']) / denom * 100) if denom else 0
-        else: metrics['Trades_Ratio_Pct'] = 0
-            
-        metrics['Avg_Trade_Buy'] = (metrics['Vol_Buy'] / metrics['Trade_Buy']) if (metrics['Vol_Buy'] is not None and metrics['Trade_Buy']) else 0
-        metrics['Avg_Trade_Sell'] = (metrics['Vol_Sell'] / metrics['Trade_Sell']) if (metrics['Vol_Sell'] is not None and metrics['Trade_Sell']) else 0
-        
-        if metrics['Avg_Trade_Buy'] > 0: metrics['Tilt_Pct'] = (metrics['Avg_Trade_Sell'] / metrics['Avg_Trade_Buy'] - 1) * 100
-        else: metrics['Tilt_Pct'] = 0
-            
-        total_active_vol = (metrics['Vol_Buy'] + metrics['Vol_Sell']) if (metrics['Vol_Buy'] is not None and metrics['Vol_Sell'] is not None) else V
-        metrics['CVD_Pct'] = (metrics['Vol_Delta'] / total_active_vol * 100) if (metrics['Vol_Delta'] is not None and total_active_vol) else 0
-        metrics['CVD_Small'] = abs(metrics['CVD_Pct']) < 1.0
-        metrics['CVD_Sign'] = 1 if metrics['CVD_Pct'] > 0 else (-1 if metrics['CVD_Pct'] < 0 else 0)
-        
-        if metrics['Vol_Buy'] is not None and metrics['Vol_Sell'] is not None and (metrics['Vol_Buy'] + metrics['Vol_Sell']) > 0:
-            metrics['Implied_Price'] = V / (metrics['Vol_Buy'] + metrics['Vol_Sell'])
-        else: metrics['Implied_Price'] = 0
-
-        oi = data.get('oi', {})
-        metrics['OI_Open'] = oi.get('Open')
-        metrics['OI_High'] = oi.get('High')
-        metrics['OI_Low'] = oi.get('Low')
-        metrics['OI_Close'] = oi.get('Close')
-        
-        if re.search(r"Open Interest [^L]* (USDT|USD|\$)", raw_text): metrics['OI_Units'] = "USDT"
-        elif re.search(r"Open Interest [^L]* (coin|COIN|BTC|ETH|SOL|XRP|ADA)", raw_text): metrics['OI_Units'] = "coin"
-        else: metrics['OI_Units'] = "contracts"
-
-        metrics['DOI_Pct'] = ((oi.get('Close', 0) - oi.get('Open', 0)) / oi.get('Open', 1) * 100) if oi.get('Open') else 0
-        
-        tf = data.get('timeframe', '4h').lower()
-        th = thresholds.THRESHOLDS.get(tf, thresholds.THRESHOLDS['4h'])
-        asset_c = thresholds.ASSET_COEFFS.get(data.get('symbol', '').split(' ')[0].upper(), {'coeff': 1.0})['coeff']
-        metrics['POROG_DOI_Pct'] = th['SENS'] * asset_c
-        
-        porog = metrics['POROG_DOI_Pct']
-        metrics['r_Strength'] = (abs(metrics['DOI_Pct']) / porog) if porog else 0
-        
-        if metrics['r_Strength'] >= 2: metrics['Signal_Strength'] = "сильный"
-        elif metrics['r_Strength'] >= 1: metrics['Signal_Strength'] = "средний"
-        else: metrics['Signal_Strength'] = "слабый"
-
-        metrics['epsilon'] = 0.33 * porog
-        metrics['OE'] = abs(metrics['DOI_Pct']) / abs(metrics['Change_Pct']) if abs(metrics['Change_Pct']) > 0 else 0
-        
-        if oi.get('High') is not None and oi.get('Low') is not None:
-            oi_rng = oi['High'] - oi['Low']
-            raw_pos = (oi['Close'] - oi['Low']) / oi_rng if oi_rng else 0.5
-            metrics['OI_Pos'] = max(0.0, min(1.0, raw_pos))
-        else: metrics['OI_Pos'] = 0.5
-
-        if metrics['DOI_Pct'] > 0: metrics['OI_Path'] = "up"
-        elif metrics['DOI_Pct'] < 0: metrics['OI_Path'] = "down"
-        else: metrics['OI_Path'] = "neutral"
-            
-        metrics['OI_Flow'] = "новые позиции" if metrics['DOI_Pct'] > 0 else "закрытия"
-
-        t_set = porog * th['k_set']
-        t_ctr = porog * th['k_ctr']
-        t_unl = -(porog * th['k_unl'])
-        metrics['T_Set'] = t_set
-        metrics['T_Ctr'] = t_ctr
-        metrics['T_Unl'] = t_unl
-
-        metrics['OI_In_Sens'] = abs(metrics['DOI_Pct']) <= metrics['POROG_DOI_Pct']
-        metrics['OI_Set'] = metrics['DOI_Pct'] > t_set
-        metrics['OI_Unload'] = metrics['DOI_Pct'] <= t_unl
-        
-        liq = data.get('liquidation', {})
-        ll = liq.get('Long', 0) or 0
-        ls = liq.get('Short', 0) or 0
-        metrics['Liq_Long'] = ll
-        metrics['Liq_Short'] = ls
-        metrics['LiqShare_Pct'] = (ll + ls) / V * 100 if V else 0
-        
-        if (ll + ls) > 0: metrics['Limb'] = ((ls - ll) / (ll + ls) * 100)
-        else: metrics['Limb'] = 0
-        
-        metrics['Liq_Squeeze'] = metrics['LiqShare_Pct'] > (thresholds.LIQ_SQUEEZE_THRESHOLD * 100)
-
-        metrics['DPX'] = metrics['Price_Sign'] * metrics['CVD_Sign']
-        metrics['Price_vs_Delta'] = "div" if metrics['DPX'] == -1 else ("match" if metrics['DPX'] == 1 else "neutral")
-        metrics['OI_Counter'] = (metrics['DPX'] == -1) and (metrics['DOI_Pct'] > t_ctr)
-        
-        trades_sign = 1 if metrics['Trades_Ratio_Pct'] > 0 else (-1 if metrics['Trades_Ratio_Pct'] < 0 else 0)
-        metrics['Ratio_Stable'] = (metrics['CVD_Sign'] == trades_sign)
-        
-        geo_score = 0
-        if metrics['CLV_Pct'] >= 80 or metrics['CLV_Pct'] <= 20: geo_score += 2
-        if metrics['Upper_Tail_Pct'] >= 30: geo_score += 1
-        if metrics['Body_Pct'] >= 30: geo_score += 1
-        metrics['Geo_Score'] = geo_score
-        
-        adapt_sens = metrics.get('POROG_DOI_Pct', 0.5) 
-        if adapt_sens == 0: adapt_sens = 0.5
-        
-        flow_score = 0
-        abs_doi = abs(metrics['DOI_Pct'])
-        if abs_doi >= adapt_sens: flow_score += 2
-        elif abs_doi >= 0.5 * adapt_sens: flow_score += 1
-            
-        if metrics['DPX'] == -1: flow_score += 1
-        if metrics['Ratio_Stable']: flow_score += 1
-        metrics['Flow_Score'] = flow_score
-        
-        liq_penalty = 0
-        if metrics['LiqShare_Pct'] >= 0.3: liq_penalty = -2
-        elif metrics['LiqShare_Pct'] >= 0.2: liq_penalty = -1
-        metrics['Liq_Penalty'] = liq_penalty
-        
-        metrics['RQ_Calculated'] = max(0, geo_score + flow_score + liq_penalty)
-
-    except Exception as e:
-        import traceback
-        st.error(f"Calc Error: {e}")
-        
-    return metrics
-
-def parse_candle_data(text):
+# --- 🧠 ЯДРО: 1. RAW INPUT PARSING (ИСПРАВЛЕНО) ---
+def parse_raw_input(text, user_date, user_time):
+    """Парсит сырой текст в словарь Raw Input согласно спецификации."""
     data = {}
+    data['raw_data'] = text.strip()
+    
+    # Флаги для надежности: Игнор регистра и Точка=все символы (вкл перенос строки)
+    REGEX_FLAGS = re.IGNORECASE | re.DOTALL
+
+    # Метаданные
     header_match = re.search(r'(.+?) · (.+?) · (\w+)', text)
-    data['exchange'] = header_match.group(1) if header_match else 'Unknown'
-    data['symbol'] = header_match.group(2) if header_match else 'Unknown'
-    data['timeframe'] = header_match.group(3) if header_match else '-'
+    data['exchange'] = header_match.group(1).strip() if header_match else 'Unknown'
+    data['raw_symbol'] = header_match.group(2).strip() if header_match else 'Unknown'
+    data['tf'] = header_match.group(3).strip() if header_match else '4h'
+    
+    # Очистка тикера
+    data['symbol_clean'] = data['raw_symbol'].split(' ')[0].replace('USDT', '').replace('PERP', '')
+    
+    # Поиск явного таймстемпа в тексте (dd.mm.yyyy HH:MM:SS или HH:MM)
+    ts_match = re.search(r'(\d{1,2}\.\d{1,2}\.\d{4}\s+\d{1,2}:\d{2}(?::\d{2})?)', text)
+    if ts_match:
+        ts_str = ts_match.group(1)
+        try:
+            # Try with seconds
+            dt_obj = datetime.strptime(ts_str, "%d.%m.%Y %H:%M:%S")
+            data['ts'] = dt_obj.isoformat()
+            data['parsed_ts'] = data['ts'] 
+        except ValueError:
+            try:
+                # Try without seconds
+                dt_obj = datetime.strptime(ts_str, "%d.%m.%Y %H:%M")
+                data['ts'] = dt_obj.isoformat()
+                data['parsed_ts'] = data['ts'] 
+            except:
+                 data['ts'] = datetime.combine(user_date, user_time).isoformat()
+    else:
+        data['ts'] = datetime.combine(user_date, user_time).isoformat()
 
+    # OHLC
     ohlc_match = re.search(r'O ([\d,.]+) H ([\d,.]+) L ([\d,.]+) C ([\d,.]+)', text)
-    data['ohlc'] = {
-        'Open': parse_float(ohlc_match.group(1)) if ohlc_match else None,
-        'High': parse_float(ohlc_match.group(2)) if ohlc_match else None,
-        'Low': parse_float(ohlc_match.group(3)) if ohlc_match else None,
-        'Close': parse_float(ohlc_match.group(4)) if ohlc_match else None
-    }
-
+    if ohlc_match:
+        data['open'] = parse_value_raw(ohlc_match.group(1))
+        data['high'] = parse_value_raw(ohlc_match.group(2))
+        data['low'] = parse_value_raw(ohlc_match.group(3))
+        data['close'] = parse_value_raw(ohlc_match.group(4))
+    else:
+        # Заглушки, чтобы не ломать вычисления
+        data['open'] = data['high'] = data['low'] = data['close'] = 0.0
+    
+    # Volume & Change
+    # Volume
     data['volume'] = extract(r'V ([\d,.]+[MKB]?)', text)
     
-    vol_buy = extract(r'Active Buy/Sell Volume Buy ([+\-]?[\d,.]+[MKB]?)', text)
-    vol_sell = extract(r'Active Buy/Sell Volume.*?Sell ([+\-]?[\d,.]+[MKB]?)', text)
-    data['vol_metrics'] = {
-        'Buy': vol_buy,
-        'Sell': abs(vol_sell) if vol_sell is not None else None,
-        'Delta': extract(r'Active Buy/Sell Volume.*?Delta ([+\-]?[\d,.]+[MKB]?)', text)
-    }
+    # Change & Amplitude (Compound parsing)
+    # Ex: Change -3.81(-0.12%) Amplitude 29.72(0.92%)
+    ch_match = re.search(r'Change\s+([+\-]?[\d,.]+)\s*\(([+\-]?[\d,.]+)%\)', text, REGEX_FLAGS)
+    if ch_match:
+        data['change_abs'] = parse_value_raw(ch_match.group(1))
+        data['change_pct'] = parse_value_raw(ch_match.group(2))
+    else:
+        # Fallback if distinct
+        data['change_abs'] = extract(r'Change\s+([+\-]?[\d,.]+)', text)
+        data['change_pct'] = extract(r'Change.*?([+\-]?[\d,.]+)%', text)
 
-    trade_buy = extract(r'Active Buy/Sell Trades Buy ([+\-]?[\d,.]+[MKB]?)', text)
-    trade_sell = extract(r'Active Buy/Sell Trades.*?Sell ([+\-]?[\d,.]+[MKB]?)', text)
-    data['trade_metrics'] = {
-        'Buy': trade_buy,
-        'Sell': abs(trade_sell) if trade_sell is not None else None,
-        'Delta': extract(r'Active Buy/Sell Trades.*?Delta ([+\-]?[\d,.]+[MKB]?)', text)
-    }
+    amp_match = re.search(r'Amplitude\s+([\d,.]+)\s*\(([\d,.]+)%\)', text, REGEX_FLAGS)
+    if amp_match:
+        data['amplitude_abs'] = parse_value_raw(amp_match.group(1))
+        data['amplitude_pct'] = parse_value_raw(amp_match.group(2))
+    else:
+        data['amplitude_abs'] = extract(r'Amplitude\s+([\d,.]+)', text)
+        data['amplitude_pct'] = extract(r'Amplitude.*?([\d,.]+)%', text)
+    
+    # Active Volume
+    data['buy_volume'] = extract(r'Active Buy/Sell Volume.*?Buy ([+\-]?[\d,.]+[MKB]?)', text)
+    data['sell_volume'] = abs(extract(r'Active Buy/Sell Volume.*?Sell ([+\-]?[\d,.]+[MKB]?)', text))
+    data['abv_delta'] = extract(r'Active Buy/Sell Volume.*?Delta ([+\-]?[\d,.]+[MKB]?)', text)
+    data['abv_ratio'] = extract(r'Active Buy/Sell Volume.*?Ratio ([+\-]?[\d,.]+)', text)
+    
+    # Trades
+    data['buy_trades'] = extract(r'Active Buy/Sell Trades.*?Buy ([+\-]?[\d,.]+[MKB]?)', text)
+    data['sell_trades'] = abs(extract(r'Active Buy/Sell Trades.*?Sell ([+\-]?[\d,.]+[MKB]?)', text))
+    data['trades_delta'] = extract(r'Active Buy/Sell Trades.*?Delta ([+\-]?[\d,.]+[MKB]?)', text)
+    data['trades_ratio'] = extract(r'Active Buy/Sell Trades.*?Ratio ([+\-]?[\d,.]+)', text)
 
-    oi_match = re.search(r'Open Interest O ([\d,.]+[MKB]?) H ([\d,.]+[MKB]?) L ([\d,.]+[MKB]?) C ([\d,.]+[MKB]?)', text)
-    data['oi'] = {
-        'Open': parse_value(oi_match.group(1)) if oi_match else None,
-        'High': parse_value(oi_match.group(2)) if oi_match else None,
-        'Low': parse_value(oi_match.group(3)) if oi_match else None,
-        'Close': parse_value(oi_match.group(4)) if oi_match else None
-    }
+    # Open Interest
+    oi_match = re.search(r'Open Interest.*?O ([\d,.]+[MKB]?) H ([\d,.]+[MKB]?) L ([\d,.]+[MKB]?) C ([\d,.]+[MKB]?)', text, REGEX_FLAGS)
+    if oi_match:
+        data['oi_open'] = parse_value_raw(oi_match.group(1))
+        data['oi_high'] = parse_value_raw(oi_match.group(2))
+        data['oi_low'] = parse_value_raw(oi_match.group(3))
+        data['oi_close'] = parse_value_raw(oi_match.group(4))
 
-    liq_long = extract(r'Liquidation Long ([\d,.]+[MKB]?)', text)
-    liq_short = extract(r'Liquidation.*?Short ([+\-]?[\d,.]+[MKB]?)', text)
-    data['liquidation'] = {
-        'Long': liq_long,
-        'Short': abs(liq_short) if liq_short is not None else None
-    }
+    # Liquidations
+    data['liq_long'] = extract(r'Liquidation Long ([\d,.]+[MKB]?)', text)
+    data['liq_short'] = abs(extract(r'Liquidation.*?Short ([+\-]?[\d,.]+[MKB]?)', text))
 
+    # --- COINGLASS FIELDS PARSING (ИСПРАВЛЕНО С REGEX FLAGS) ---
+    
+    # Funding Rate (exclude Aggregated)
+    fr_match = re.search(r'(?<!Aggregated )Funding Rate.*?O ([+\-]?[\d,.]+%?).*?H ([+\-]?[\d,.]+%?).*?L ([+\-]?[\d,.]+%?).*?C ([+\-]?[\d,.]+%?)', text, REGEX_FLAGS)
+    if fr_match:
+        data['fr_open'] = parse_value_raw(fr_match.group(1))
+        data['fr_high'] = parse_value_raw(fr_match.group(2))
+        data['fr_low'] = parse_value_raw(fr_match.group(3))
+        data['fr_close'] = parse_value_raw(fr_match.group(4))
+    
+    # Aggregated Funding Rate
+    agg_fr_match = re.search(r'Aggregated Funding Rate.*?O ([+\-]?[\d,.]+%?).*?H ([+\-]?[\d,.]+%?).*?L ([+\-]?[\d,.]+%?).*?C ([+\-]?[\d,.]+%?)', text, REGEX_FLAGS)
+    if agg_fr_match:
+        data['agg_fr_open'] = parse_value_raw(agg_fr_match.group(1))
+        data['agg_fr_high'] = parse_value_raw(agg_fr_match.group(2))
+        data['agg_fr_low'] = parse_value_raw(agg_fr_match.group(3))
+        data['agg_fr_close'] = parse_value_raw(agg_fr_match.group(4))
+
+    # Basis
+    data['basis'] = extract(r'Basis ([+\-]?[\d,.]+)', text)
+
+    # Long/Short Ratio
+    ls_match = re.search(r'Long/Short Ratio.*?O ([+\-]?[\d,.]+).*?H ([+\-]?[\d,.]+).*?L ([+\-]?[\d,.]+).*?C ([+\-]?[\d,.]+)', text, REGEX_FLAGS)
+    if ls_match:
+        data['ls_ratio_open'] = parse_value_raw(ls_match.group(1))
+        data['ls_ratio_high'] = parse_value_raw(ls_match.group(2))
+        data['ls_ratio_low'] = parse_value_raw(ls_match.group(3))
+        data['ls_ratio_close'] = parse_value_raw(ls_match.group(4))
+
+    # Index Price
+    idx_match = re.search(r'Index Price.*?O ([\d,.]+).*?H ([\d,.]+).*?L ([\d,.]+).*?C ([\d,.]+)', text, REGEX_FLAGS)
+    if idx_match:
+        data['idx_open'] = parse_value_raw(idx_match.group(1))
+        data['idx_high'] = parse_value_raw(idx_match.group(2))
+        data['idx_low'] = parse_value_raw(idx_match.group(3))
+        data['idx_close'] = parse_value_raw(idx_match.group(4))
+
+    # Net Longs (Используем .*? для надежности между числами)
+    nl_match = re.search(r'Net Longs.*?O ([+\-]?[\d,.]+[MKB]?).*?C ([+\-]?[\d,.]+[MKB]?).*?(?:Delta|Δ) ([+\-]?[\d,.]+[MKB]?)', text, REGEX_FLAGS)
+    if nl_match:
+        data['net_longs_open'] = parse_value_raw(nl_match.group(1))
+        data['net_longs_close'] = parse_value_raw(nl_match.group(2))
+        data['net_longs_delta'] = parse_value_raw(nl_match.group(3))
+
+    # Net Shorts
+    ns_match = re.search(r'Net Shorts.*?O ([+\-]?[\d,.]+[MKB]?).*?C ([+\-]?[\d,.]+[MKB]?).*?(?:Delta|Δ) ([+\-]?[\d,.]+[MKB]?)', text, REGEX_FLAGS)
+    if ns_match:
+        data['net_shorts_open'] = parse_value_raw(ns_match.group(1))
+        data['net_shorts_close'] = parse_value_raw(ns_match.group(2))
+        data['net_shorts_delta'] = parse_value_raw(ns_match.group(3))
+    
     return data
 
-def add_candle_to_db(date, time, raw_data, report_text, note=""):
-    try:
-        df = load_candles()
-        data = parse_candle_data(raw_data)
-        metrics = calculate_derived_metrics(data, raw_data)
-        
-        def get_fmt(d, k): return fmt(d.get(k))
-        
-        row_dict = {
-            "Date": date,
-            "Time": time,
-            "Exchange": data.get('exchange'),
-            "Symbol": data.get('symbol'),
-            "Timeframe": data.get('timeframe'),
-            "Note": note,
-            "Open": data['ohlc']['Open'],
-            "High": data['ohlc']['High'],
-            "Low": data['ohlc']['Low'],
-            "Close": data['ohlc']['Close'],
-            "Volume": data.get('volume'),
-            "Raw_Data": raw_data,
-            "X-RAY Report": report_text
-        }
-
-        for key, val in metrics.items():
-            if key not in row_dict:
-                row_dict[key] = fmt(val) if isinstance(val, (int, float)) else val
-
-        new_row = pd.DataFrame([row_dict])
-        
-        bool_cols = ["CVD_Small", "OI_In_Sens", "OI_Set", "OI_Counter", "OI_Unload", "Liq_Squeeze", "Ratio_Stable"]
-        for col in bool_cols:
-            if col in new_row.columns:
-                new_row[col] = new_row[col].astype(bool)
-
-        for col in df.columns:
-            if col not in new_row.columns: new_row[col] = None
-        new_row = new_row[df.columns]
-
-        df = pd.concat([df, new_row], ignore_index=True)
-        save_candles(df)
-        return True, f"Candle for {data.get('symbol', 'Unknown')} saved!"
-    except Exception as e:
-        import traceback
-        return False, f"Error saving candle: {e}\n{traceback.format_exc()}"
-
-# --- ГЛАВНЫЙ ИНТЕРФЕЙС (UI) ---
-
-st.title("🖤 VANTA")
-tab1, tab2, tab3 = st.tabs(["Отчеты", "Уровни", "БД Свечи"])
-
-# --- ВКЛАДКА 1: ОТЧЕТЫ ---
-with tab1:
-    st.markdown("### 📦 Загрузка Свечей")
-
+# --- 🧠 ЯДРО: 2. CALCULATED METRICS ---
+def calculate_metrics(raw_data, config):
+    """Считает метрики на основе Raw Input и конфигов из БД."""
+    m = raw_data.copy()
     
-    def split_candle_input(text):
-        exchanges = ["Binance", "Bybit", "OKX", "Bitget", "Coinbase", "Kraken", "KuCoin", "HTX", "Gate.io", "MEXC", "BingX"]
-        pattern = r'(?=(?:' + '|'.join(exchanges) + r')\s+·)'
-        parts = re.split(pattern, text, flags=re.IGNORECASE)
-        return [p.strip() for p in parts if p.strip()]
-
-    # Removed st.form to remove the border
-    input_text = st.text_area("Input", label_visibility="collapsed", height=200, placeholder="Вставьте одну или несколько свечей")
-    process_submitted = st.button("Распарсить Пакет", type="primary")
-
-    if process_submitted and input_text:
-        raw_candles = split_candle_input(input_text)
-        parsed_batch = []
-        for raw in raw_candles:
-            data = parse_candle_data(raw)
-            if data:
-                parsed_batch.append({'id': str(uuid.uuid4()), 'raw': raw, 'data': data, 'valid': True})
-            else:
-                 parsed_batch.append({'id': str(uuid.uuid4()), 'raw': raw, 'data': None, 'valid': False})
-        st.session_state['parsed_batch'] = parsed_batch
-
-    if 'parsed_batch' in st.session_state and st.session_state['parsed_batch']:
-        st.divider()
-        st.subheader(f"Найдено свечей: {len(st.session_state['parsed_batch'])}")
-        
-        valid_candles = []
-        for i, item in enumerate(st.session_state['parsed_batch']):
-            # ИСПОЛЬЗУЕМ "СТЕКЛЯННЫЙ" КОНТЕЙНЕР (border=True активирует CSS)
-            with st.container(border=True):
-                if item['valid']:
-                    data = item['data']
-                    col_info, col_date, col_h, col_m = st.columns([4, 2, 1, 1])
-                    
-                    with col_info:
-                        st.markdown(f"**#{i+1} {data['exchange']} {data['symbol']}** <span class='tf-badge'>{data['timeframe']}</span>", unsafe_allow_html=True)
-                        st.caption(f"Close: {fmt(data['ohlc']['Close'])}")
-                    
-                    with col_date:
-                        d_key = f"date_{i}"
-                        if d_key not in st.session_state: st.session_state[d_key] = datetime.now().date()
-                        new_date = st.date_input("Дата", key=d_key, label_visibility="collapsed")
-                        
-                    with col_h:
-                        h_key = f"hour_{i}"
-                        if h_key not in st.session_state: st.session_state[h_key] = datetime.now().hour
-                        new_h = st.number_input("Час", min_value=0, max_value=23, step=1, key=h_key, label_visibility="collapsed", help="Часы")
-                    
-                    with col_m:
-                        m_key = f"min_{i}"
-                        if m_key not in st.session_state: st.session_state[m_key] = datetime.now().minute
-                        new_m = st.number_input("Мин", min_value=0, max_value=59, step=1, key=m_key, label_visibility="collapsed", help="Минуты")
-                    
-                    item['user_date'] = new_date
-                    item['user_time'] = time(new_h, new_m)
-                    
-                    metrics = calculate_derived_metrics(data, item['raw'])
-                    def fmt_bool(val): return "true" if val else "false"
-                    ts_str = f"{item['user_date'].strftime('%d.%m.%Y')} {item['user_time'].strftime('%H:%M')}"
-                    
-                    report = f"""ts: {ts_str}
-exchange: {data['exchange']}
-symbol: {data['symbol']}
-tf: {data['timeframe']}
-open: {fmt(data['ohlc']['Open'])}
-high: {fmt(data['ohlc']['High'])}
-low: {fmt(data['ohlc']['Low'])}
-close: {fmt(data['ohlc']['Close'])}
-volume: {fmt(data['volume'])}
-buy_volume: {fmt(metrics.get('Vol_Buy'))}
-sell_volume: {fmt(metrics.get('Vol_Sell'))}
-buy_trades: {fmt(metrics.get('Trade_Buy'))}
-sell_trades: {fmt(metrics.get('Trade_Sell'))}
-oi_open: {fmt(metrics.get('OI_Open'))}
-oi_high: {fmt(metrics.get('OI_High'))}
-oi_low: {fmt(metrics.get('OI_Low'))}
-oi_close: {fmt(metrics.get('OI_Close'))}
-liq_long: {fmt(metrics.get('Liq_Long'))}
-liq_short: {fmt(metrics.get('Liq_Short'))}
-range: {fmt(metrics.get('Amplitude_Abs'))}
-body_pct: {fmt(metrics.get('Body_Pct'))}%
-clv_pct: {fmt(metrics.get('CLV_Pct'))}%
-upper_tail_pct: {fmt(metrics.get('Upper_Tail_Pct'))}%
-lower_tail_pct: {fmt(metrics.get('Lower_Tail_Pct'))}%
-price_sign: {metrics.get('Price_Sign')}
-dominant_reject: {metrics.get('Dominant_Reject')}
-cvd_pct: {fmt(metrics.get('CVD_Pct'))}%
-cvd_sign: {metrics.get('CVD_Sign')}
-cvd_small: {fmt_bool(metrics.get('CVD_Small'))}
-dpx: {fmt(metrics.get('DPX'))}
-price_vs_delta: {metrics.get('Price_vs_Delta')}
-dtrades_pct: {fmt(metrics.get('Trades_Ratio_Pct'))}%
-ratio_stable: {fmt_bool(metrics.get('Ratio_Stable'))}
-tilt_pct: {fmt(metrics.get('Tilt_Pct'))}%
-doi_pct: {fmt(metrics.get('DOI_Pct'))}%
-oi_in_sens: {fmt_bool(metrics.get('OI_In_Sens'))}
-oi_set: {fmt_bool(metrics.get('OI_Set'))}
-oi_counter: {fmt_bool(metrics.get('OI_Counter'))}
-oi_unload: {fmt_bool(metrics.get('OI_Unload'))}
-oipos: {fmt(metrics.get('OI_Pos'))}
-oi_path: {metrics.get('OI_Path')}
-oe: {fmt(metrics.get('OE'))}
-liqshare_pct: {fmt(metrics.get('LiqShare_Pct'))}%
-limb_pct: {fmt(metrics.get('Limb'))}%
-liq_squeeze: {fmt_bool(metrics.get('Liq_Squeeze'))}
-range_pct: {fmt(metrics.get('Range_Pct'))}%
-implied_price: {fmt(metrics.get('Implied_Price'))}
-avg_trade_buy: {fmt(metrics.get('Avg_Trade_Buy'))}
-avg_trade_sell: {fmt(metrics.get('Avg_Trade_Sell'))}"""
-                    
-                    item['report'] = report
-                    valid_candles.append(item)
-                else:
-                    st.error(f"#{i+1}: Ошибка парсинга.")
-
-        st.subheader("📊 Генерация Отчетов")
-        if st.button("🔬 X-RAY Отчет"):
-            full_report = ""
-            for item in valid_candles:
-                full_report += f"--- REPORT FOR {item['data']['symbol']} ---\n{item['report']}\n\n"
-            st.markdown("### 📝 X-RAY Batch Report")
-            st.code(full_report, language='yaml')
-
-        st.divider()
-        st.subheader("💾 Сохранение")
-        if st.button("Сохранить ВСЕ свечи в базу", type="primary"):
-            saved_count = 0; errors = []
-            progress_bar = st.progress(0)
-            for i, item in enumerate(valid_candles):
-                try:
-                    success, msg = add_candle_to_db(
-                        item['user_date'], 
-                        item['user_time'], 
-                        item['raw'], 
-                        item['report'],
-                        note="Batch Import"
-                    )
-                    if success: saved_count += 1
-                    else: errors.append(f"{item['data']['symbol']}: {msg}")
-                except Exception as e:
-                    errors.append(f"{item['data']['symbol']}: {e}")
-                progress_bar.progress((i + 1) / len(valid_candles))
-            if saved_count > 0: st.success(f"Успешно сохранено свечей: {saved_count}")
-            if errors:
-                st.error(f"Ошибки ({len(errors)}):")
-                for err in errors: st.write(err)
-
-# --- ВКЛАДКА 2: УРОВНИ ---
-with tab2:
-    st.header("Управление Уровнями")
-    with st.form("add_level_form"):
-        col_sym, col_price, col_type = st.columns(3)
-        with col_sym: new_symbol = st.text_input("Символ (например, ETH)", value="")
-        with col_price: new_price = st.number_input("Цена", min_value=0.0, step=0.01, format="%.2f")
-        with col_type: new_type = st.selectbox("Тип", ["Resistance", "Support", "Liquidity", "Other"])
-        new_note = st.text_input("Заметка (Опционально)")
-        if st.form_submit_button("Добавить Уровень"):
-            df = load_levels()
-            new_row = pd.DataFrame({"Symbol": [new_symbol], "Price": [new_price], "Type": [new_type], "Note": [new_note]})
-            df = pd.concat([df, new_row], ignore_index=True)
-            save_levels(df)
-            st.success("Уровень добавлен!")
-            st.rerun()
-    df = load_levels()
-    if not df.empty:
-        display_df = df.rename(columns={"Symbol": "Символ", "Price": "Цена", "Type": "Тип", "Note": "Заметка"})
-        st.dataframe(display_df, hide_index=True, use_container_width=True)
+    # 1. Geometry
+    m['range'] = m.get('high', 0) - m.get('low', 0)
+    m['range_pct'] = (m['range'] / m['close'] * 100) if m.get('close') else 0
+    m['body_pct'] = (abs(m.get('close', 0) - m.get('open', 0)) / m['range'] * 100) if m['range'] else 0
+    
+    if m['range'] == 0: m['clv_pct'] = 50.0
+    else: m['clv_pct'] = (m.get('close', 0) - m.get('low', 0)) / m['range'] * 100
+    
+    if m['range'] == 0:
+        m['upper_tail_pct'] = 0; m['lower_tail_pct'] = 0
     else:
-        st.info("Список уровней пуст.")
+        m['upper_tail_pct'] = (m.get('high', 0) - max(m.get('open', 0), m.get('close', 0))) / m['range'] * 100
+        m['lower_tail_pct'] = (min(m.get('open', 0), m.get('close', 0)) - m.get('low', 0)) / m['range'] * 100
 
-# --- ВКЛАДКА 3: БД СВЕЧИ ---
-with tab3:
-    st.header("База Свечей")
-    candles_df = load_candles()
+    m['price_sign'] = 1 if m.get('close', 0) >= m.get('open', 0) else -1
+
+    # 2. Volume & Trades Metrics
+    total_active_vol = m.get('buy_volume', 0) + m.get('sell_volume', 0)
+    m['cvd_pct'] = (m.get('abv_delta', 0) / total_active_vol * 100) if total_active_vol else 0
+    m['cvd_sign'] = 1 if m.get('abv_delta', 0) > 0 else -1
+    m['cvd_small'] = abs(m['cvd_pct']) < 1.0 
+
+    total_trades = m.get('buy_trades', 0) + m.get('sell_trades', 0)
+    m['dtrades_pct'] = (m.get('trades_delta', 0) / total_trades * 100) if total_trades else 0
     
-    if not candles_df.empty:
-        candles_df = candles_df.sort_index(ascending=False)
+    sign_abv = (m.get('abv_delta', 0) > 0) - (m.get('abv_delta', 0) < 0)
+    sign_trades = (m.get('trades_delta', 0) > 0) - (m.get('trades_delta', 0) < 0)
+    m['ratio_stable'] = (sign_abv == sign_trades)
+
+    m['avg_trade_buy'] = (m.get('buy_volume', 0) / m.get('buy_trades', 0)) if m.get('buy_trades', 0) else 0
+    m['avg_trade_sell'] = (m.get('sell_volume', 0) / m.get('sell_trades', 0)) if m.get('sell_trades', 0) else 0
+    
+    if m['avg_trade_buy'] > 0:
+        m['tilt_pct'] = ((m['avg_trade_sell'] / m['avg_trade_buy']) - 1) * 100
+    else:
+        m['tilt_pct'] = 0
+
+    m['implied_price'] = (m.get('volume', 0) / total_active_vol) if total_active_vol else 0
+    m['dpx'] = m['price_sign'] * m['cvd_sign'] 
+    
+    if m['dpx'] == 1: m['price_vs_delta'] = "match"
+    elif m['dpx'] == -1: m['price_vs_delta'] = "div"
+    else: m['price_vs_delta'] = "neutral"
+
+    # 3. Open Interest Calculations
+    m['doi_pct'] = ((m.get('oi_close', 0) - m.get('oi_open', 0)) / m.get('oi_open', 0) * 100) if m.get('oi_open', 0) else 0
+    
+    oi_rng = m.get('oi_high', 0) - m.get('oi_low', 0)
+    if oi_rng == 0: m['oipos'] = 0.5
+    else:
+        raw_pos = (m.get('oi_close', 0) - m.get('oi_low', 0)) / oi_rng
+        m['oipos'] = max(0.0, min(1.0, raw_pos))
+
+    up_move = abs(m.get('oi_high', 0) - m.get('oi_open', 0))
+    dn_move = abs(m.get('oi_low', 0) - m.get('oi_open', 0))
+    if up_move > dn_move: m['oi_path'] = "up"
+    elif dn_move > up_move: m['oi_path'] = "down"
+    else: m['oi_path'] = "neutral"
+
+    m['oe'] = abs(m['doi_pct']) / abs(m['change_pct']) if abs(m.get('change_pct', 0)) > 0 else 0
+
+    # 4. Liquidations
+    total_liq = m.get('liq_long', 0) + m.get('liq_short', 0)
+    m['liq_share_pct'] = (total_liq / m.get('volume', 0) * 100) if m.get('volume', 0) else 0
+    m['limb_pct'] = ((m.get('liq_short', 0) - m.get('liq_long', 0)) / total_liq * 100) if total_liq else 0
+    m['liq_squeeze'] = m['liq_share_pct'] >= config['global_squeeze_limit']
+
+    # 5. Dominant Reject
+    LT, UT, Body, CLV = m['lower_tail_pct'], m['upper_tail_pct'], m['body_pct'], m['clv_pct']
+    dr = None
+    if (LT >= 3 * Body) and (UT <= 10) and (CLV >= 85): dr = "bull_Ideal"
+    elif (UT >= 3 * Body) and (LT <= 10) and (CLV <= 15): dr = "bear_Ideal"
+    elif (LT >= 2 * Body) and (UT <= 25) and (CLV >= 75): dr = "bull_Valid"
+    elif (UT >= 2 * Body) and (LT <= 25) and (CLV <= 25): dr = "bear_Valid"
+    elif (LT >= 1.5 * Body) and (CLV >= 65) and (UT <= 0.5 * LT): dr = "bull_Loose"
+    elif (UT >= 1.5 * Body) and (CLV <= 35) and (LT <= 0.5 * UT): dr = "bear_Loose"
+    m['dominant_reject'] = dr
+
+    # 6. Advanced Threshold Logic
+    porog_df = config.get('porog_doi', pd.DataFrame())
+    asset_coeffs = config.get('asset_coeffs', {})
+    tf_params = config.get('tf_params', {})
+    
+    symbol_key = m.get('symbol_clean', '').lower()
+    tf_key = m.get('tf', '4h')
+    
+    base_sens = 0.5
+    coeff = 1.0
+    
+    if not porog_df.empty and symbol_key in porog_df.columns and 'timeframe' in porog_df.columns:
+        row = porog_df.loc[porog_df['timeframe'] == tf_key]
+        if not row.empty:
+            base_sens = float(row[symbol_key].values[0])
+            
+    if m.get('symbol_clean') in asset_coeffs:
+        coeff = asset_coeffs[m['symbol_clean']]
         
-        candles_df.insert(0, "Удалить", False)
+    m['porog_final'] = base_sens * coeff
+    m['epsilon'] = 0.33 * m['porog_final']
+    m['oi_in_sens'] = abs(m['doi_pct']) <= m['porog_final']
+    
+    k_set = tf_params.get(tf_key, {}).get('k_set', 1.0)
+    k_ctr = tf_params.get(tf_key, {}).get('k_ctr', 1.0)
+    k_unl = tf_params.get(tf_key, {}).get('k_unl', 1.0)
+    
+    m['t_set_pct'] = m['porog_final'] * k_set
+    m['oi_set'] = m['doi_pct'] > m['t_set_pct']
+    
+    m['t_counter_pct'] = m['porog_final'] * k_ctr
+    m['oi_counter'] = (m['dpx'] == -1) and (m['doi_pct'] > m['t_counter_pct'])
+    
+    m['t_unload_pct'] = -(m['porog_final'] * k_unl)
+    m['oi_unload'] = m['doi_pct'] <= m['t_unload_pct']
+    
+    m['r_strength'] = abs(m['doi_pct']) / m['porog_final'] if m['porog_final'] else 0
+    m['r'] = m['r_strength']
+    
+    return m
+
+# --- 💾 БД ---
+def save_candles_batch(candles_data):
+    if not candles_data: return True
+    
+    # Deep copy to allow modification during retries
+    current_data = [c.copy() for c in candles_data]
+    
+    # Ensure note exists
+    for row in current_data:
+        if 'note' not in row: row['note'] = ""
+            
+    # Attempt loop
+    attempt = 0
+    max_attempts = 20 # Enough for many missing metrics
+    dropped_columns = []
+    
+    while attempt < max_attempts:
+        try:
+            # Upsert to handle partial duplicates (ignore existing, insert new)
+            # .select() is CRITICAL to know what was actually inserted
+            res = supabase.table('candles').upsert(
+                current_data, 
+                on_conflict='exchange,symbol_clean,tf,ts', 
+                ignore_duplicates=True
+            ).execute()
+            
+            inserted_data = res.data if res.data else []
+            
+            # Helper to normalize key for comparison (Fix for format mismatch)
+            def get_cmp_key(r):
+                ts = r.get('ts', '')
+                # Normalize TS to "YYYY-MM-DD HH:MM" to ignore seconds/miliseconds/timezone differences
+                ts_norm = str(ts).replace('T', ' ')[:16]
+                return (r.get('exchange'), r.get('symbol_clean'), r.get('tf'), ts_norm)
+
+            # Identify skipped duplicates
+            inserted_keys = set(get_cmp_key(row) for row in inserted_data)
+            
+            duplicates = []
+            for row in current_data:
+                if get_cmp_key(row) not in inserted_keys:
+                    duplicates.append(row)
+            
+            # Report Duplicates
+            if duplicates:
+                # Format specific list for user
+                dup_list = [f"{d['ts'][:16].replace('T', ' ')}" for d in duplicates]
+                st.warning(f"⚠️ Эти свечи уже были в базе (сохранение не требуется): {', '.join(dup_list)}")
+
+            if dropped_columns:
+                st.warning(f"⚠️ Сохранено (но пропущены отсутствующие в БД поля: {', '.join(dropped_columns)})")
+            
+            return True
+        except Exception as e:
+            err_str = str(e)
+            # Detect column error (PGRST204)
+            match = re.search(r"Could not find the '(\w+)' column", err_str)
+            if match:
+                bad_col = match.group(1)
+                if bad_col not in dropped_columns:
+                    dropped_columns.append(bad_col)
+                    # Remove this column from all rows
+                    for row in current_data:
+                        row.pop(bad_col, None)
+                else:
+                     # Loop detected?
+                     st.error(f"Зацикливание на колонке {bad_col}: {e}")
+                     return False
+                attempt += 1
+            else:
+                # Other error
+                st.error(f"Ошибка сохранения в БД: {e}")
+                return False
+                
+    st.error("Не удалось сохранить после нескольких попыток удаления лишних полей.")
+    return False
+
+def load_candles_db():
+    try:
+        # no_cache() ?
+        res = supabase.table('candles').select("*").order('ts', desc=True).limit(100).execute()
+        return pd.DataFrame(res.data) if res.data else pd.DataFrame()
+    except Exception as e:
+        st.error(f"Ошибка чтения БД: {e}")
+        return pd.DataFrame()
+
+def delete_candles_db(ids):
+    try:
+        supabase.table('candles').delete().in_('id', ids).execute()
+        return True
+    except Exception as e:
+        st.error(f"Ошибка удаления: {e}")
+        return False
+
+def update_candle_db(id, changes):
+    try:
+        supabase.table('candles').update(changes).eq('id', id).execute()
+        return True
+    except Exception as e:
+        st.error(f"Ошибка обновления: {e}")
+        return False
+
+# --- 📝 REPORTING ---
+def fmt_num(val, decimals=2, is_pct=False):
+    if val is None: return "−"
+    if isinstance(val, bool): return "true" if val else "false"
+    if isinstance(val, (int, float)):
+        s = f"{val:,.{decimals}f}".replace(",", " ").replace(".", ",")
+        if is_pct: s += "%"
+        return s
+    return str(val)
+
+def generate_full_report(d):
+    ts_obj = datetime.fromisoformat(d['ts'])
+    ts_str = ts_obj.strftime("%d.%m.%Y %H:%M")
+    dr = d.get('dominant_reject') or "−"
+    
+    lines = [
+        f"ts: {ts_str}",
+        f"exchange: {d.get('exchange')}",
+        f"symbol: {d.get('raw_symbol')}",
+        f"tf: {d.get('tf')}",
+        f"open: {fmt_num(d.get('open'))}",
+        f"high: {fmt_num(d.get('high'))}",
+        f"low: {fmt_num(d.get('low'))}",
+        f"close: {fmt_num(d.get('close'))}",
+        f"volume: {fmt_num(d.get('volume'), 0)}",
+        f"buy_volume: {fmt_num(d.get('buy_volume'), 0)}",
+        f"sell_volume: {fmt_num(d.get('sell_volume'), 0)}",
+        f"buy_trades: {fmt_num(d.get('buy_trades'), 0)}",
+        f"sell_trades: {fmt_num(d.get('sell_trades'), 0)}",
+        f"oi_open: {fmt_num(d.get('oi_open'), 0)}",
+        f"oi_high: {fmt_num(d.get('oi_high'), 0)}",
+        f"oi_low: {fmt_num(d.get('oi_low'), 0)}",
+        f"oi_close: {fmt_num(d.get('oi_close'), 0)}",
+        f"liq_long: {fmt_num(d.get('liq_long'), 0)}",
+        f"liq_short: {fmt_num(d.get('liq_short'), 0)}",
+        f"range: {fmt_num(d.get('range'))}",
+        f"body_pct: {fmt_num(d.get('body_pct'), 2, True)}",
+        f"clv_pct: {fmt_num(d.get('clv_pct'), 2, True)}",
+        f"upper_tail_pct: {fmt_num(d.get('upper_tail_pct'), 2, True)}",
+        f"lower_tail_pct: {fmt_num(d.get('lower_tail_pct'), 2, True)}",
+        f"price_sign: {d.get('price_sign')}",
+        f"dominant_reject: {dr}",
+        f"cvd_pct: {fmt_num(d.get('cvd_pct'), 2, True)}",
+        f"cvd_sign: {d.get('cvd_sign')}",
+        f"cvd_small: {fmt_num(d.get('cvd_small'))}",
+        f"dpx: {fmt_num(d.get('dpx'))}",
+        f"price_vs_delta: {d.get('price_vs_delta')}",
+        f"dtrades_pct: {fmt_num(d.get('dtrades_pct'), 2, True)}",
+        f"ratio_stable: {fmt_num(d.get('ratio_stable'))}",
+        f"tilt_pct: {fmt_num(d.get('tilt_pct'), 2, True)}",
+        f"doi_pct: {fmt_num(d.get('doi_pct'), 2, True)}",
+        f"oi_in_sens: {fmt_num(d.get('oi_in_sens'))}",
+        f"oi_set: {fmt_num(d.get('oi_set'))}",
+        f"oi_counter: {fmt_num(d.get('oi_counter'))}",
+        f"oi_unload: {fmt_num(d.get('oi_unload'))}",
+        f"oipos: {fmt_num(d.get('oipos'), 2, True)}",
+        f"oi_path: {d.get('oi_path')}",
+        f"oe: {fmt_num(d.get('oe'))}",
+        f"liqshare_pct: {fmt_num(d.get('liq_share_pct'), 2, True)}",
+        f"limb_pct: {fmt_num(d.get('limb_pct'), 2, True)}",
+        f"liq_squeeze: {fmt_num(d.get('liq_squeeze'))}",
+        f"range_pct: {fmt_num(d.get('range_pct'), 2, True)}",
+        f"implied_price: {fmt_num(d.get('implied_price'))}",
+        f"avg_trade_buy: {fmt_num(d.get('avg_trade_buy'))}",
+        f"avg_trade_sell: {fmt_num(d.get('avg_trade_sell'))}"
+    ]
+    return "\n".join(lines)
+
+def generate_cg_report(d):
+    lines = [
+        "Funding Rate:",
+        f"fr_open: {fmt_num(d.get('fr_open'), 6, True)}",
+        f"fr_high: {fmt_num(d.get('fr_high'), 6, True)}",
+        f"fr_low: {fmt_num(d.get('fr_low'), 6, True)}",
+        f"fr_close: {fmt_num(d.get('fr_close'), 6, True)}",
+        "",
+        "Aggregated Funding Rate:",
+        f"agg_fr_open: {fmt_num(d.get('agg_fr_open'), 6, True)}",
+        f"agg_fr_high: {fmt_num(d.get('agg_fr_high'), 6, True)}",
+        f"agg_fr_low: {fmt_num(d.get('agg_fr_low'), 6, True)}",
+        f"agg_fr_close: {fmt_num(d.get('agg_fr_close'), 6, True)}",
+        "",
+        "Basis:",
+        f"basis: {fmt_num(d.get('basis'))}",
+        "",
+        "Long/Short Ratio:",
+        f"ls_ratio_open: {fmt_num(d.get('ls_ratio_open'))}",
+        f"ls_ratio_high: {fmt_num(d.get('ls_ratio_high'))}",
+        f"ls_ratio_low: {fmt_num(d.get('ls_ratio_low'))}",
+        f"ls_ratio_close: {fmt_num(d.get('ls_ratio_close'))}",
+        "",
+        "Index Price:",
+        f"idx_open: {fmt_num(d.get('idx_open'))}",
+        f"idx_high: {fmt_num(d.get('idx_high'))}",
+        f"idx_low: {fmt_num(d.get('idx_low'))}",
+        f"idx_close: {fmt_num(d.get('idx_close'))}",
+        "",
+        "Net Longs:",
+        f"net_longs_open: {fmt_num(d.get('net_longs_open'), 0)}",
+        f"net_longs_close: {fmt_num(d.get('net_longs_close'), 0)}",
+        f"net_longs_delta: {fmt_num(d.get('net_longs_delta'), 0)}",
+        "",
+        "Net Shorts:",
+        f"net_shorts_open: {fmt_num(d.get('net_shorts_open'), 0)}",
+        f"net_shorts_close: {fmt_num(d.get('net_shorts_close'), 0)}",
+        f"net_shorts_delta: {fmt_num(d.get('net_shorts_delta'), 0)}"
+    ]
+    return "\n".join(lines)
+
+# --- 🖥 UI ---
+st.title("🖤 VANTA")
+tab1, tab2 = st.tabs(["Отчеты", "БД"])
+
+with tab1:
+    input_text = st.text_area("Вставьте данные свечи", height=150, label_visibility="collapsed", placeholder="Вставьте свечи здесь...")
+    
+    # Скрываем выбор даты/времени, берем текущие
+    user_date = datetime.now().date()
+    user_time = datetime.now().time()
+    
+    process = st.button("Распарсить", type="primary")
+
+    if process and input_text:
+        config = load_configurations()
+        if config:
+            raw_chunks = re.split(r'(?=(?:Binance|Bybit|OKX)\s+·)', input_text, flags=re.IGNORECASE)
+            raw_chunks = [x.strip() for x in raw_chunks if x.strip()]
+            
+            merged_groups = {}
+            pending_ts = None
+            TS_REGEX_STREAM = r'(\d{1,2}\.\d{1,2}\.\d{4}\s+\d{1,2}:\d{2}(?::\d{2})?)'
+
+            for chunk in raw_chunks:
+                # 1. Поиск "хвостового" таймстемпа для следующего чанка
+                next_ts = None
+                clean_chunk = chunk
+                all_ts = list(re.finditer(TS_REGEX_STREAM, chunk))
+                if all_ts:
+                    last_match = all_ts[-1]
+                    # Если дата в самом конце строки (с небольшим допуском) для валидного чанка
+                    # Или если это Unknown чанк (где дата может быть единственным содержимым)
+                    if last_match.end() >= len(chunk) - 5: 
+                        next_ts = last_match.group(1)
+                        clean_chunk = chunk[:last_match.start()].strip()
+
+                # 2. Парсинг (очищенного) чанка
+                base_data = parse_raw_input(clean_chunk, user_date, user_time)
+                
+                # 3. Логика переноса даты
+                if base_data.get('exchange') == 'Unknown':
+                    # Если это "мусорный" чанк, но он содержал дату
+                    if next_ts:
+                         pending_ts = next_ts
+                         next_ts = None # Consumed
+                    elif base_data.get('parsed_ts'):
+                         pending_ts = base_data['parsed_ts']
+                    continue
+
+                # Применяем pending_ts, если есть
+                if pending_ts:
+                    # Пробуем распарсить pending_ts
+                    try:
+                        # Сначала пробуем с секундами, потом без
+                        try:
+                            dt = datetime.strptime(pending_ts, "%d.%m.%Y %H:%M:%S")
+                        except ValueError:
+                            dt = datetime.strptime(pending_ts, "%d.%m.%Y %H:%M")
+                        base_data['ts'] = dt.isoformat()
+                    except:
+                        pass # Оставляем как есть, если не распарсилось
+                
+                # Обновляем pending_ts для следующего круга
+                if next_ts:
+                    pending_ts = next_ts
+                else:
+                    pending_ts = None
+
+                key = (base_data.get('symbol_clean'), base_data.get('tf'), base_data.get('ts'))
+                
+                if key not in merged_groups:
+                    merged_groups[key] = base_data
+                else:
+                    existing = merged_groups[key]
+                    for k, v in base_data.items():
+                        if v and (k not in existing or not existing[k]):
+                            existing[k] = v
+            
+            processed_batch = []
+            
+            for key, raw_data in merged_groups.items():
+                full_data = calculate_metrics(raw_data, config)
+                full_data['x_ray'] = generate_full_report(full_data)
+                
+                if full_data.get('net_longs_delta') is not None or full_data.get('agg_fr_close') is not None:
+                     cg_text = generate_cg_report(full_data)
+                     # GLUE: X-RAY + CoinGlass Report as requested
+                     full_data['x_ray_coinglass'] = full_data['x_ray'] + "\n\n" + cg_text
+                else:
+                    full_data['x_ray_coinglass'] = None
+                
+                processed_batch.append(full_data)
+            
+            st.session_state.processed_batch = processed_batch
+
+    if 'processed_batch' in st.session_state and st.session_state.processed_batch:
+        batch = st.session_state.processed_batch
         
+        # Save Button at the very top of the section
+        if st.button(f"💾 Сохранить {len(batch)} свечей", type="primary"):
+            if save_candles_batch(batch):
+                st.success("Сохранено!")
+                st.cache_data.clear()
+
+        st.divider()
+
+        for full_data in batch:
+            # Prepare Label
+            try:
+                ts_obj = datetime.fromisoformat(full_data['ts'])
+                ts_str = ts_obj.strftime('%d.%m.%Y %H:%M')
+            except:
+                ts_str = str(full_data.get('ts'))
+            
+            # Minimalist Header in Expander Label
+            label = f"{ts_str} · {full_data.get('exchange')} · {full_data.get('symbol_clean')} · {full_data.get('tf')} · O {fmt_num(full_data.get('open'))}"
+            
+            with st.expander(label):
+                with st.container(height=300):
+                    st.code(full_data['x_ray'], language="yaml")
+                    if full_data['x_ray_coinglass']:
+                        st.code(full_data['x_ray_coinglass'], language="yaml")
+
+with tab2:
+    
+    # 1. Load Data
+    df = load_candles_db()
+
+    if not df.empty:
+        if 'note' not in df.columns: df['note'] = ""
+        df.insert(0, "delete", False)
+        # Convert TS
+        df['ts'] = pd.to_datetime(df['ts'], errors='coerce')
+
+        # 2. Controls Toolbar (Top)
+        c1, c2 = st.columns([0.25, 0.75])
+        
+        # SAVE BUTTON
+        with c1:
+             if st.button("💾 Сохранить изменения", key="btn_save_top", type="primary"):
+                 if "db_editor" in st.session_state and "edited_rows" in st.session_state["db_editor"]:
+                     changes_map = st.session_state["db_editor"]["edited_rows"]
+                     if changes_map:
+                         count = 0
+                         for idx, changes in changes_map.items():
+                             valid_changes = {k: v for k, v in changes.items() if k != 'delete'}
+                             if valid_changes:
+                                 row_id = df.iloc[idx]['id']
+                                 update_candle_db(row_id, valid_changes)
+                                 count += 1
+                         if count > 0:
+                             st.toast(f"✅ Обновлено {count} свечей")
+                             st.cache_data.clear()
+                             st.rerun()
+                         else:
+                             st.info("Нет смысловых изменений.")
+                     else:
+                         st.info("Нет изменений.")
+        
+        # SELECT ALL CHECKBOX
+        with c2:
+             # Spacer to align checkbox vertically with button text
+             st.write("")
+             if st.checkbox("Выделить все", key="select_all_del_top"):
+                  df['delete'] = True
+
+        visible_cols = ['ts', 'tf', 'x_ray', 'x_ray_coinglass', 'note', 'raw_data']
+        
+        # 3. Data Editor (Bottom)
         edited_df = st.data_editor(
-            candles_df,
-            column_config={
-                "Удалить": st.column_config.CheckboxColumn(
-                    "Удалить?",
-                    help="Выберите свечи для удаления",
-                    default=False,
-                ),
-                "X-RAY Report": st.column_config.TextColumn("Отчет X-RAY", width="large"),
-                "Raw_Data": st.column_config.TextColumn("Сырые данные", width="medium"),
-            },
+            df,
+            key="db_editor",
+            column_order=["delete"] + visible_cols,
+            use_container_width=True,
             hide_index=True,
-            num_rows="fixed",
-            use_container_width=True
+            column_config={
+                "delete": st.column_config.CheckboxColumn("🗑", default=False, width=20),
+                "ts": st.column_config.DatetimeColumn("Time", format="DD.MM.YYYY HH:mm", width="small"),
+                "x_ray": st.column_config.TextColumn("X-RAY", width="small"),
+                "x_ray_coinglass": st.column_config.TextColumn("CG Report", width="small"),
+                "note": st.column_config.TextColumn("Note ✏️", width="small"),
+                "raw_data": st.column_config.TextColumn("Raw", width="small"),
+            }
         )
         
-        col_del, col_down = st.columns([1, 1])
-        
-        with col_del:
-            if st.button("🗑 Удалить выбранные и Обновить"):
-                rows_to_keep = edited_df[edited_df["Удалить"] == False]
-                rows_to_keep = rows_to_keep.drop(columns=["Удалить"])
-                save_candles(rows_to_keep)
-                st.success("База обновлена!")
-                st.rerun()
-                
-        with col_down:
-            export_df = candles_df.drop(columns=["Удалить"])
-            csv = export_df.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="Скачать базу (CSV)",
-                data=csv,
-                file_name='candles_export.csv',
-                mime='text/csv',
-            )
+        # DELETE BUTTON (Below Table)
+        to_delete = edited_df[edited_df.delete == True]
+        if not to_delete.empty:
+            if st.button(f"🗑 Удалить {len(to_delete)} выделенных", key="btn_del_bottom", type="secondary"):
+                if delete_candles_db(to_delete['id'].tolist()):
+                    st.toast("Удалено!")
+                    st.cache_data.clear()
+                    st.rerun()
     else:
-        st.info("База пуста.")
+        st.info("База данных пуста.")
