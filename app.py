@@ -247,7 +247,7 @@ def parse_raw_input(text, user_date, user_time):
         data['agg_fr_close'] = parse_value_raw(agg_fr_match.group(4))
 
     # Basis
-    data['basis'] = extract(r'Basis ([+\-]?[\d,.]+)', text)
+    data['basis'] = extract(r'Basis\s+([+\-]?[\d,.]+)', text)
 
     # Long/Short Ratio
     ls_match = re.search(r'Long/Short Ratio.*?O ([+\-]?[\d,.]+).*?H ([+\-]?[\d,.]+).*?L ([+\-]?[\d,.]+).*?C ([+\-]?[\d,.]+)', text, REGEX_FLAGS)
@@ -405,6 +405,104 @@ def calculate_metrics(raw_data, config):
     
     return m
 
+# --- 🔄 СЛИЯНИЕ С БД (Merge-on-Parse) ---
+def fetch_and_merge_db(batch_data, config):
+    """
+    1. Ищет существующие свечи в БД по (exchange, symbol, tf, ts).
+    2. Объединяет новые данные с существующими.
+    """
+    if not batch_data: return []
+    
+    # Helper to normalize key for reliable matching
+    def get_merge_key(ex, sym, tf, ts):
+        # Normalize TS: "2025-12-10T12:00:00" -> "2025-12-10 12:00"
+        # Handles various ISO formats and timezone offsets by taking first 16 chars
+        clean_ts = str(ts).replace('T', ' ')[:16]
+        return (ex, sym, tf, clean_ts)
+
+    # 1. Группировка для оптимизации запросов
+    # Нужно запросить диапазоны времени для каждого тикера
+    groups = {} # (ex, sym, tf) -> [ts_list]
+    for row in batch_data:
+        key = (row.get('exchange'), row.get('symbol_clean'), row.get('tf'))
+        if key not in groups: groups[key] = []
+        groups[key].append(row.get('ts'))
+        
+    db_map = {} # (ex, sym, tf, ts) -> db_row
+    
+    # 2. Batch Fetching
+    try:
+        for (ex, sym, tf), ts_list in groups.items():
+            if not ts_list: continue
+            min_ts = min(ts_list)
+            max_ts = max(ts_list)
+            
+            # Запрос к БД: exchange + symbol + tf + диапазон времени
+            res = supabase.table('candles')\
+                .select("*")\
+                .eq('exchange', ex)\
+                .eq('symbol_clean', sym)\
+                .eq('tf', tf)\
+                .gte('ts', min_ts)\
+                .lte('ts', max_ts)\
+                .execute()
+                
+            if res.data:
+                for db_row in res.data:
+                     # Use normalized key
+                    k = get_merge_key(db_row.get('exchange'), db_row.get('symbol_clean'), db_row.get('tf'), db_row.get('ts'))
+                    db_map[k] = db_row
+                    
+    except Exception as e:
+        st.error(f"Ошибка получения данных из БД для слияния: {e}")
+        pass 
+
+    # 3. Merging
+    # Whitelist of fields that can be updated from Supplementary candles (CoinGlass)
+    SUPPLEMENTARY_FIELDS = {
+        'fr_open', 'fr_high', 'fr_low', 'fr_close',
+        'agg_fr_open', 'agg_fr_high', 'agg_fr_low', 'agg_fr_close',
+        'basis',
+        'ls_ratio_open', 'ls_ratio_high', 'ls_ratio_low', 'ls_ratio_close',
+        'idx_open', 'idx_high', 'idx_low', 'idx_close',
+        'net_longs_open', 'net_longs_close', 'net_longs_delta',
+        'net_shorts_open', 'net_shorts_close', 'net_shorts_delta'
+    }
+
+    merged_batch = []
+    for new_row in batch_data:
+        # Use normalized key
+        k = get_merge_key(new_row.get('exchange'), new_row.get('symbol_clean'), new_row.get('tf'), new_row.get('ts'))
+        existing = db_map.get(k)
+        
+        if existing:
+            # Стратегия слияния (Whitelist + Source Check):
+            combined = existing.copy()
+            
+            # Определяем тип входящих данных: это Доп. свеча (CoinGlass) или Основная?
+            # Если есть 'fr_open', считаем это Доп. свечой.
+            is_supp_source = 'fr_open' in new_row
+            
+            for key, val in new_row.items():
+                if key in SUPPLEMENTARY_FIELDS:
+                    # Дополнительные поля обновляем ТОЛЬКО если источник - Доп. свеча
+                    if is_supp_source:
+                        combined[key] = val
+                elif not is_supp_source:
+                    # Основные поля (OHLC, Volume, Trades, etc) НЕ трогаем, если источник - Доп. свеча
+                    # Если источник - Основная свеча (не Supp), то обновляем, если в базе пусто
+                    existing_val = combined.get(key)
+                    is_existing_empty = (existing_val is None) or (isinstance(existing_val, (int, float)) and existing_val == 0)
+                    
+                    if is_existing_empty:
+                         combined[key] = val
+            
+            merged_batch.append(combined)
+        else:
+            merged_batch.append(new_row)
+            
+    return merged_batch
+
 # --- 💾 БД ---
 def save_candles_batch(candles_data):
     if not candles_data: return True
@@ -412,9 +510,11 @@ def save_candles_batch(candles_data):
     # Deep copy to allow modification during retries
     current_data = [c.copy() for c in candles_data]
     
-    # Ensure note exists
+    # Ensure note exists and remove ID to rely on composite key upsert
     for row in current_data:
         if 'note' not in row: row['note'] = ""
+        # Remove 'id' to prevent "null value in column id" error during mixed batch upserts
+        row.pop('id', None)
             
     # Attempt loop
     attempt = 0
@@ -423,39 +523,11 @@ def save_candles_batch(candles_data):
     
     while attempt < max_attempts:
         try:
-            # Upsert to handle partial duplicates (ignore existing, insert new)
-            # .select() is CRITICAL to know what was actually inserted
+            # Upsert WITHOUT ignore_duplicates to allow UPDATES
             res = supabase.table('candles').upsert(
                 current_data, 
-                on_conflict='exchange,symbol_clean,tf,ts', 
-                ignore_duplicates=True
+                on_conflict='exchange,symbol_clean,tf,ts'
             ).execute()
-            
-            inserted_data = res.data if res.data else []
-            
-            # Helper to normalize key for comparison (Fix for format mismatch)
-            def get_cmp_key(r):
-                ts = r.get('ts', '')
-                # Normalize TS to "YYYY-MM-DD HH:MM" to ignore seconds/miliseconds/timezone differences
-                ts_norm = str(ts).replace('T', ' ')[:16]
-                return (r.get('exchange'), r.get('symbol_clean'), r.get('tf'), ts_norm)
-
-            # Identify skipped duplicates
-            inserted_keys = set(get_cmp_key(row) for row in inserted_data)
-            
-            duplicates = []
-            for row in current_data:
-                if get_cmp_key(row) not in inserted_keys:
-                    duplicates.append(row)
-            
-            # Report Duplicates
-            if duplicates:
-                # Format specific list for user
-                dup_list = [f"{d['ts'][:16].replace('T', ' ')}" for d in duplicates]
-                st.warning(f"⚠️ Эти свечи уже были в базе (сохранение не требуется): {', '.join(dup_list)}")
-
-            if dropped_columns:
-                st.warning(f"⚠️ Сохранено (но пропущены отсутствующие в БД поля: {', '.join(dropped_columns)})")
             
             return True
         except Exception as e:
@@ -482,10 +554,31 @@ def save_candles_batch(candles_data):
     st.error("Не удалось сохранить после нескольких попыток удаления лишних полей.")
     return False
 
-def load_candles_db():
+def load_candles_db(limit=500, tf_list=None, date_range=None):
     try:
-        # no_cache() ?
-        res = supabase.table('candles').select("*").order('ts', desc=True).limit(100).execute()
+        query = supabase.table('candles').select("*").order('ts', desc=True)
+        
+        # Apply Filters
+        if tf_list:
+            query = query.in_('tf', tf_list)
+            
+        if date_range:
+            # date_range is typically (start_date, end_date) from st.date_input
+            if len(date_range) == 2:
+                start_date, end_date = date_range
+                # Ensure we cover the whole end day
+                import datetime as dt
+                # Convert to string ISO format if they are date objects
+                s_str = start_date.strftime('%Y-%m-%d 00:00:00')
+                e_str = end_date.strftime('%Y-%m-%d 23:59:59')
+                query = query.gte('ts', s_str).lte('ts', e_str)
+            elif len(date_range) == 1:
+                # Single day selected
+                d_str = date_range[0].strftime('%Y-%m-%d')
+                query = query.gte('ts', f"{d_str} 00:00:00").lte('ts', f"{d_str} 23:59:59")
+        
+        # Apply Limit
+        res = query.limit(limit).execute()
         return pd.DataFrame(res.data) if res.data else pd.DataFrame()
     except Exception as e:
         st.error(f"Ошибка чтения БД: {e}")
@@ -684,7 +777,7 @@ with tab1:
                 else:
                     pending_ts = None
 
-                key = (base_data.get('symbol_clean'), base_data.get('tf'), base_data.get('ts'))
+                key = (base_data.get('exchange'), base_data.get('symbol_clean'), base_data.get('tf'), base_data.get('ts'))
                 
                 if key not in merged_groups:
                     merged_groups[key] = base_data
@@ -694,17 +787,38 @@ with tab1:
                         if v and (k not in existing or not existing[k]):
                             existing[k] = v
             
+            # --- LOCAL MERGED BATCH IS READY ---
+            local_batch = list(merged_groups.values())
+            
+            # --- DB MERGE (ENRICHMENT) ---
+            final_batch_list = fetch_and_merge_db(local_batch, config)
+            
             processed_batch = []
             
-            for key, raw_data in merged_groups.items():
+            for raw_data in final_batch_list:
                 full_data = calculate_metrics(raw_data, config)
-                full_data['x_ray'] = generate_full_report(full_data)
                 
-                if full_data.get('net_longs_delta') is not None or full_data.get('agg_fr_close') is not None:
-                     cg_text = generate_cg_report(full_data)
-                     # GLUE: X-RAY + CoinGlass Report as requested
-                     full_data['x_ray_coinglass'] = full_data['x_ray'] + "\n\n" + cg_text
+                # Logic: Check for Main Data (Active Volume) and Supplementary Data (Funding Rate)
+                has_main = raw_data.get('buy_volume', 0) != 0
+                has_supp = 'fr_open' in raw_data
+                
+                # 1. X-RAY Report (Requires Main Data)
+                if has_main:
+                    full_data['x_ray'] = generate_full_report(full_data)
                 else:
+                    full_data['x_ray'] = None
+                
+                # 2. CoinGlass Report
+                cg_text = generate_cg_report(full_data) if has_supp else ""
+                
+                if has_main and has_supp:
+                    # Both: X-RAY + CoinGlass
+                    full_data['x_ray_coinglass'] = full_data['x_ray'] + "\n\n" + cg_text
+                elif has_supp and not has_main:
+                    # Supp Only: Just CoinGlass
+                    full_data['x_ray_coinglass'] = cg_text
+                else:
+                    # Main Only: x_ray_coinglass is None
                     full_data['x_ray_coinglass'] = None
                 
                 processed_batch.append(full_data)
@@ -735,14 +849,34 @@ with tab1:
             
             with st.expander(label):
                 with st.container(height=300):
-                    st.code(full_data['x_ray'], language="yaml")
-                    if full_data['x_ray_coinglass']:
-                        st.code(full_data['x_ray_coinglass'], language="yaml")
+                    # Logic to display exactly what is available
+                    if full_data.get('x_ray_coinglass'):
+                         # If this is present, it's either "Supp Only" (CG only) OR "Both" (XRAY+CG)
+                         st.code(full_data['x_ray_coinglass'], language="yaml")
+                    elif full_data.get('x_ray'):
+                         # If x_ray_coinglass is None, but x_ray is present (Main Only)
+                         st.code(full_data['x_ray'], language="yaml")
 
 with tab2:
     
-    # 1. Load Data
-    df = load_candles_db()
+    # 1. Filters Toolbar
+    with st.expander("🔎 Фильтры поиска", expanded=True):
+        f_col1, f_col2, f_col3 = st.columns([1, 3, 1])
+        
+        with f_col1:
+            # Common TFs
+            tfs = ['1m', '5m', '15m', '1H', '4H', '1D', '1W', '1M']
+            selected_tfs = st.multiselect("TF:", options=tfs, default=[], placeholder="Все")
+        
+        with f_col2:
+            # Date Input with RU format
+            selected_dates = st.date_input("Диапазон дат:", value=[], format="DD.MM.YYYY", help="Выберите начальную и конечную дату")
+            
+        with f_col3:
+            limit_rows = st.selectbox("Лимит:", [100, 500, 1000, 5000], index=1)
+
+    # 2. Load Data with Filters
+    df = load_candles_db(limit=limit_rows, tf_list=selected_tfs, date_range=selected_dates)
 
     if not df.empty:
         if 'note' not in df.columns: df['note'] = ""
@@ -750,54 +884,60 @@ with tab2:
         # Convert TS
         df['ts'] = pd.to_datetime(df['ts'], errors='coerce')
 
-        # 2. Controls Toolbar (Top)
+        # 3. Toolbar (Save / Delete)
         c1, c2 = st.columns([0.25, 0.75])
         
         # SAVE BUTTON
         with c1:
              if st.button("💾 Сохранить изменения", key="btn_save_top", type="primary"):
-                 if "db_editor" in st.session_state and "edited_rows" in st.session_state["db_editor"]:
-                     changes_map = st.session_state["db_editor"]["edited_rows"]
-                     if changes_map:
-                         count = 0
-                         for idx, changes in changes_map.items():
-                             valid_changes = {k: v for k, v in changes.items() if k != 'delete'}
-                             if valid_changes:
-                                 row_id = df.iloc[idx]['id']
-                                 update_candle_db(row_id, valid_changes)
-                                 count += 1
-                         if count > 0:
-                             st.toast(f"✅ Обновлено {count} свечей")
-                             st.cache_data.clear()
-                             st.rerun()
-                         else:
-                             st.info("Нет смысловых изменений.")
-                     else:
-                         st.info("Нет изменений.")
+                  if "db_editor" in st.session_state and "edited_rows" in st.session_state["db_editor"]:
+                      changes_map = st.session_state["db_editor"]["edited_rows"]
+                      if changes_map:
+                          count = 0
+                          for idx, changes in changes_map.items():
+                              valid_changes = {k: v for k, v in changes.items() if k != 'delete'}
+                              if valid_changes:
+                                  # Get ID from the original dataframe (careful with index if sorted)
+                                  # st.data_editor uses the provided df index. 
+                                  # If we filter or range, we must be consistent.
+                                  # df is fresh from DB, so idx corresponds to this page's df.
+                                  row_id = df.iloc[idx]['id']
+                                  update_candle_db(row_id, valid_changes)
+                                  count += 1
+                          if count > 0:
+                              st.toast(f"✅ Обновлено {count} свечей")
+                              st.cache_data.clear()
+                              st.rerun()
+                          else:
+                              st.info("Нет смысловых изменений.")
+                      else:
+                          st.info("Нет изменений.")
         
         # SELECT ALL CHECKBOX
         with c2:
-             # Spacer to align checkbox vertically with button text
-             st.write("")
-             if st.checkbox("Выделить все", key="select_all_del_top"):
+             st.write("") # spacer
+             if st.checkbox("Выделить все на этой странице", key="select_all_del_top"):
                   df['delete'] = True
 
-        visible_cols = ['ts', 'tf', 'x_ray', 'x_ray_coinglass', 'note', 'raw_data']
+        visible_cols = ['ts', 'tf', 'x_ray', 'x_ray_coinglass', 'x_ray_composite', 'note', 'raw_data']
         
-        # 3. Data Editor (Bottom)
+        # 4. Data Editor
         edited_df = st.data_editor(
             df,
             key="db_editor",
             column_order=["delete"] + visible_cols,
             use_container_width=True,
             hide_index=True,
+            height=800, # Increased height
             column_config={
-                "delete": st.column_config.CheckboxColumn("🗑", default=False, width=20),
-                "ts": st.column_config.DatetimeColumn("Time", format="DD.MM.YYYY HH:mm", width="small"),
+                "delete": st.column_config.CheckboxColumn("🗑", default=False, width="small"),
+                "ts": st.column_config.DatetimeColumn("Time", format="DD.MM.YYYY HH:mm", width="small", disabled=True),
+                "tf": st.column_config.TextColumn("tf", width="small", disabled=True),
                 "x_ray": st.column_config.TextColumn("X-RAY", width="small"),
                 "x_ray_coinglass": st.column_config.TextColumn("CG Report", width="small"),
-                "note": st.column_config.TextColumn("Note ✏️", width="small"),
-                "raw_data": st.column_config.TextColumn("Raw", width="small"),
+                "x_ray_composite": st.column_config.TextColumn("Composite", width="small"),
+                "note": st.column_config.TextColumn("Note ✏️", width="medium"),
+                "raw_data": st.column_config.TextColumn("Raw", width="large"),
             }
         )
         
@@ -810,4 +950,4 @@ with tab2:
                     st.cache_data.clear()
                     st.rerun()
     else:
-        st.info("База данных пуста.")
+        st.info("База данных пуста (или на этой странице нет данных).")
