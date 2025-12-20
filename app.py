@@ -6,6 +6,8 @@ from datetime import datetime, time
 from supabase import create_client, Client
 import math
 import math
+import base64
+import os
 
 # --- Настройка страницы ---
 st.set_page_config(
@@ -51,23 +53,16 @@ st.markdown("""
             margin-bottom: 24px;
             padding: 24px !important;
         }
-        .stTextInput input, .stNumberInput input, .stDateInput input, .stTextArea textarea {
-            background-color: rgba(0, 0, 0, 0.3) !important;
-            color: white !important;
-            border: 1px solid rgba(255, 255, 255, 0.1) !important;
-            border-radius: 10px !important;
-        }
-        [data-testid="stDataFrame"] {
-            background: rgba(0, 0, 0, 0.2);
-            border-radius: 12px;
-            padding: 10px;
-        }
         .tf-badge {
             background: linear-gradient(135deg, #ECEFF1, #B0BEC5);
             color: #263238; padding: 3px 10px; border-radius: 12px;
             font-size: 0.85em; font-weight: 700; margin-left: 8px;
             border: 1px solid rgba(255,255,255,0.4);
             box-shadow: 0 0 10px rgba(176, 190, 197, 0.3);
+        }
+        /* Make header transparent */
+        header[data-testid="stHeader"] {
+            background: transparent !important;
         }
     </style>
 """, unsafe_allow_html=True)
@@ -443,33 +438,65 @@ def calculate_metrics(raw_data, config):
     asset_coeffs = config.get('asset_coeffs', {})
     tf_params = config.get('tf_params', {})
     
-    symbol_key = m.get('symbol_clean', '').lower()
-    tf_key = m.get('tf', '4h')
+    # Keys for lookup
+    # 1. Porog Table: Columns are lowercase (btc, eth), TF column values might be mixed.
+    symbol_key_lower = m.get('symbol_clean', '').lower()
     
+    # 2. Asset Coeffs: Keys are Uppercase (BTC, ETH). 
+    symbol_key_upper = m.get('symbol_clean', '').upper()
+    
+    tf_val = str(m.get('tf', '4h')) # Ensure string
+    tf_key = tf_val # Restore compatibility for later lines
+    
+    # Default values (Fallbacks)
     base_sens = 0.5
     coeff = 1.0
     
-    if not porog_df.empty and symbol_key in porog_df.columns and 'timeframe' in porog_df.columns:
-        row = porog_df.loc[porog_df['timeframe'] == tf_key]
-        if not row.empty:
-            base_sens = float(row[symbol_key].values[0])
+    # Dynamic Lookup: Base Sensitivity
+    if not porog_df.empty and symbol_key_lower in porog_df.columns and 'timeframe' in porog_df.columns:
+        # Case-insensitive TF match
+        # Convert both column and target value to lowercase for comparison
+        try:
+            # Create mask for matching timeframe
+            mask = porog_df['timeframe'].astype(str).str.lower() == tf_val.lower()
+            row = porog_df.loc[mask]
             
-    if m.get('symbol_clean') in asset_coeffs:
-        coeff = asset_coeffs[m['symbol_clean']]
+            if not row.empty:
+                base_sens = float(row[symbol_key_lower].values[0])
+        except Exception:
+            pass # Keep default if matching fails
+            
+    # Dynamic Lookup: Asset Coefficient
+    if symbol_key_upper in asset_coeffs:
+        coeff = asset_coeffs[symbol_key_upper]
         
     m['porog_final'] = base_sens * coeff
     m['epsilon'] = 0.33 * m['porog_final']
     m['oi_in_sens'] = abs(m['doi_pct']) <= m['porog_final']
     
-    k_set = tf_params.get(tf_key, {}).get('k_set', 1.0)
-    k_ctr = tf_params.get(tf_key, {}).get('k_ctr', 1.0)
-    k_unl = tf_params.get(tf_key, {}).get('k_unl', 1.0)
+    # K Params: Case-insensitive lookup for tf_params
+    k_set, k_ctr, k_unl = 1.0, 1.0, 1.0
     
+    # Try exact match first
+    tf_data = tf_params.get(tf_key)
+    
+    # If not found, try case-insensitive linear search
+    if not tf_data:
+        for k_tf, v_data in tf_params.items():
+            if str(k_tf).lower() == tf_key.lower():
+                tf_data = v_data
+                break
+    
+    if tf_data:
+        k_set = tf_data.get('k_set', 1.0)
+        k_ctr = tf_data.get('k_ctr', 1.0)
+        k_unl = tf_data.get('k_unl', 1.0)
+
     m['t_set_pct'] = m['porog_final'] * k_set
-    m['oi_set'] = m['doi_pct'] > m['t_set_pct']
+    m['oi_set'] = m['doi_pct'] >= m['t_set_pct']
     
     m['t_counter_pct'] = m['porog_final'] * k_ctr
-    m['oi_counter'] = (m['dpx'] == -1) and (m['doi_pct'] > m['t_counter_pct'])
+    m['oi_counter'] = (m['dpx'] == -1) and (m['doi_pct'] >= m['t_counter_pct'])
     
     m['t_unload_pct'] = -(m['porog_final'] * k_unl)
     m['oi_unload'] = m['doi_pct'] <= m['t_unload_pct']
@@ -871,7 +898,28 @@ def generate_composite_report(candles_list):
     return report
 
 # --- 🖥 UI ---
-st.title("🖤 VANTA")
+# --- HEADER ---
+def get_base64_image(image_path):
+    with open(image_path, "rb") as f:
+        data = f.read()
+    return base64.b64encode(data).decode()
+
+logo_path = "assets/logo.png"
+if os.path.exists(logo_path):
+    img_b64 = get_base64_image(logo_path)
+    # Flex container to align image and text. 
+    # adjust height via max-height or height in css. vanta text is usually h1.
+    st.markdown(
+        f"""
+        <div style="display: flex; align-items: center; gap: 10px;">
+            <img src="data:image/png;base64,{img_b64}" style="height: 50px; width: auto;">
+            <h1 style="margin: 0; padding: 0; line-height: 1.0;">VANTA</h1>
+        </div>
+        """, 
+        unsafe_allow_html=True
+    )
+else:
+    st.title("🖤 VANTA")
 tab1, tab2 = st.tabs(["Отчеты", "БД"])
 
 with tab1:
@@ -881,7 +929,12 @@ with tab1:
     user_date = datetime.now().date()
     user_time = datetime.now().time()
     
-    process = st.button("Распарсить", type="primary")
+    col_action, col_save, _ = st.columns([1, 4, 20], gap="small")
+    
+    with col_action:
+        process = st.button("🐾", type="primary")
+
+    # Save button will be rendered into col_save downstream (after processing)
 
     if process and input_text:
         config = load_configurations()
@@ -1079,13 +1132,14 @@ with tab1:
     if 'processed_batch' in st.session_state and st.session_state.processed_batch:
         batch = st.session_state.processed_batch
         
-        # Save Button at the very top of the section
-        if st.button(f"💾 Сохранить {len(batch)} свечей (Binance)", type="primary"):
-            if save_candles_batch(batch):
-                st.success("Сохранено!")
-                st.cache_data.clear()
-
-        st.divider()
+        # Deferred Render: Save button in the top column
+        # This ensures it captures the FRESH state after "Parse" is clicked
+        with col_save:
+             if st.button(f"💾 Сохранить {len(batch)}", type="secondary", key="save_btn_top"):
+                if save_candles_batch(batch):
+                    st.toast("Успешно сохранено!", icon="💾")
+                    st.cache_data.clear()
+        
 
         for full_data in batch:
             # Prepare Label
