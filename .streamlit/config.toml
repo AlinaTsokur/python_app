@@ -2,3 +2,11 @@
 port = 8501
 headless = true
 runOnSave = true
+
+[theme]
+# Silver/Metallic Theme
+primaryColor = "#B0BEC5"
+backgroundColor = "#0e1117"
+secondaryBackgroundColor = "#263238"
+textColor = "#ECEFF1"
+font = "sans serif"

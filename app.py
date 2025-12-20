@@ -4,6 +4,8 @@ import pandas as pd
 import uuid
 from datetime import datetime, time
 from supabase import create_client, Client
+import math
+import math
 
 # --- Настройка страницы ---
 st.set_page_config(
@@ -61,10 +63,11 @@ st.markdown("""
             padding: 10px;
         }
         .tf-badge {
-            background: linear-gradient(135deg, #ff4b4b, #d10000);
-            color: white; padding: 3px 10px; border-radius: 12px;
+            background: linear-gradient(135deg, #ECEFF1, #B0BEC5);
+            color: #263238; padding: 3px 10px; border-radius: 12px;
             font-size: 0.85em; font-weight: 700; margin-left: 8px;
-            border: 1px solid rgba(255,255,255,0.2);
+            border: 1px solid rgba(255,255,255,0.4);
+            box-shadow: 0 0 10px rgba(176, 190, 197, 0.3);
         }
     </style>
 """, unsafe_allow_html=True)
@@ -122,7 +125,7 @@ def parse_value_raw(val_str):
         
     try:
         clean_str = re.sub(r'[^\d.-]', '', clean_str)
-        return float(clean_str) * multiplier
+        return round(float(clean_str) * multiplier, 2)
     except:
         return 0.0
 
@@ -130,7 +133,7 @@ def extract(regex, text):
     # Добавили DOTALL, чтобы искать по всему тексту даже с переносами строк
     match = re.search(regex, text, re.IGNORECASE | re.DOTALL)
     if match: return parse_value_raw(match.group(1))
-    return 0.0
+    return None
 
 # --- 🧠 ЯДРО: 1. RAW INPUT PARSING (ИСПРАВЛЕНО) ---
 def parse_raw_input(text, user_date, user_time):
@@ -171,7 +174,7 @@ def parse_raw_input(text, user_date, user_time):
         data['ts'] = datetime.combine(user_date, user_time).isoformat()
 
     # OHLC
-    ohlc_match = re.search(r'O ([\d,.]+) H ([\d,.]+) L ([\d,.]+) C ([\d,.]+)', text)
+    ohlc_match = re.search(r'O\s+([\d,.]+)\s+H\s+([\d,.]+)\s+L\s+([\d,.]+)\s+C\s+([\d,.]+)', text)
     if ohlc_match:
         data['open'] = parse_value_raw(ohlc_match.group(1))
         data['high'] = parse_value_raw(ohlc_match.group(2))
@@ -205,14 +208,16 @@ def parse_raw_input(text, user_date, user_time):
         data['amplitude_pct'] = extract(r'Amplitude.*?([\d,.]+)%', text)
     
     # Active Volume
-    data['buy_volume'] = extract(r'Active Buy/Sell Volume.*?Buy ([+\-]?[\d,.]+[MKB]?)', text)
-    data['sell_volume'] = abs(extract(r'Active Buy/Sell Volume.*?Sell ([+\-]?[\d,.]+[MKB]?)', text))
-    data['abv_delta'] = extract(r'Active Buy/Sell Volume.*?Delta ([+\-]?[\d,.]+[MKB]?)', text)
-    data['abv_ratio'] = extract(r'Active Buy/Sell Volume.*?Ratio ([+\-]?[\d,.]+)', text)
+    data['buy_volume'] = extract(r'Active Buy/Sell Volume.*?Buy\s+([+\-]?[\d,.]+[MKB]?)', text)
+    data['sell_volume'] = extract(r'Active Buy/Sell Volume.*?Sell\s+([+\-]?[\d,.]+[MKB]?)', text)
+    if data['sell_volume'] is not None: data['sell_volume'] = abs(data['sell_volume'])
+    data['abv_delta'] = extract(r'Active Buy/Sell Volume.*?Delta\s+([+\-]?[\d,.]+[MKB]?)', text)
+    data['abv_ratio'] = extract(r'Active Buy/Sell Volume.*?Ratio\s+([+\-]?[\d,.]+)', text)
     
     # Trades
     data['buy_trades'] = extract(r'Active Buy/Sell Trades.*?Buy ([+\-]?[\d,.]+[MKB]?)', text)
-    data['sell_trades'] = abs(extract(r'Active Buy/Sell Trades.*?Sell ([+\-]?[\d,.]+[MKB]?)', text))
+    data['sell_trades'] = extract(r'Active Buy/Sell Trades.*?Sell ([+\-]?[\d,.]+[MKB]?)', text)
+    if data['sell_trades'] is not None: data['sell_trades'] = abs(data['sell_trades'])
     data['trades_delta'] = extract(r'Active Buy/Sell Trades.*?Delta ([+\-]?[\d,.]+[MKB]?)', text)
     data['trades_ratio'] = extract(r'Active Buy/Sell Trades.*?Ratio ([+\-]?[\d,.]+)', text)
 
@@ -226,7 +231,8 @@ def parse_raw_input(text, user_date, user_time):
 
     # Liquidations
     data['liq_long'] = extract(r'Liquidation Long ([\d,.]+[MKB]?)', text)
-    data['liq_short'] = abs(extract(r'Liquidation.*?Short ([+\-]?[\d,.]+[MKB]?)', text))
+    data['liq_short'] = extract(r'Liquidation.*?Short ([+\-]?[\d,.]+[MKB]?)', text)
+    if data['liq_short'] is not None: data['liq_short'] = abs(data['liq_short'])
 
     # --- COINGLASS FIELDS PARSING (ИСПРАВЛЕНО С REGEX FLAGS) ---
     
@@ -279,6 +285,21 @@ def parse_raw_input(text, user_date, user_time):
         data['net_shorts_close'] = parse_value_raw(ns_match.group(2))
         data['net_shorts_delta'] = parse_value_raw(ns_match.group(3))
     
+    
+    # Check for missing critical fields    
+    critical_fields = [
+        'ts', 'exchange', 'raw_symbol', 'symbol_clean', 'tf', 
+        'open', 'high', 'low', 'close', 'volume', 
+        'change_abs', 'change_pct', 'amplitude_abs', 'amplitude_pct', 
+        'buy_volume', 'sell_volume', 'abv_delta', 'abv_ratio', 
+        'buy_trades', 'sell_trades', 'trades_delta', 'trades_ratio', 
+        'oi_open', 'oi_high', 'oi_low', 'oi_close', 
+        'liq_long', 'liq_short'
+    ]
+    missing = [f for f in critical_fields if data.get(f) is None]
+    if missing:
+        data['missing_fields'] = missing
+
     return data
 
 # --- 🧠 ЯДРО: 2. CALCULATED METRICS ---
@@ -289,39 +310,60 @@ def calculate_metrics(raw_data, config):
     # 1. Geometry
     m['range'] = m.get('high', 0) - m.get('low', 0)
     m['range_pct'] = (m['range'] / m['close'] * 100) if m.get('close') else 0
-    m['body_pct'] = (abs(m.get('close', 0) - m.get('open', 0)) / m['range'] * 100) if m['range'] else 0
     
-    if m['range'] == 0: m['clv_pct'] = 50.0
-    else: m['clv_pct'] = (m.get('close', 0) - m.get('low', 0)) / m['range'] * 100
+    # Body and CLV
+    rng = m['range']
+    o_px = m.get('open', 0)
+    c_px = m.get('close', 0)
+    h_px = m.get('high', 0)
+    l_px = m.get('low', 0)
     
-    if m['range'] == 0:
-        m['upper_tail_pct'] = 0; m['lower_tail_pct'] = 0
+    if rng > 0:
+        m['body_pct'] = (abs(c_px - o_px) / rng * 100)
+        m['clv_pct'] = ((c_px - l_px) / rng * 100)
+        m['upper_tail_pct'] = ((h_px - max(o_px, c_px)) / rng * 100)
+        m['lower_tail_pct'] = ((min(o_px, c_px) - l_px) / rng * 100)
     else:
-        m['upper_tail_pct'] = (m.get('high', 0) - max(m.get('open', 0), m.get('close', 0))) / m['range'] * 100
-        m['lower_tail_pct'] = (min(m.get('open', 0), m.get('close', 0)) - m.get('low', 0)) / m['range'] * 100
+        m['body_pct'] = 0
+        m['clv_pct'] = 50.0
+        m['upper_tail_pct'] = 0
+        m['lower_tail_pct'] = 0
 
     m['price_sign'] = 1 if m.get('close', 0) >= m.get('open', 0) else -1
 
     # 2. Volume & Trades Metrics
-    total_active_vol = m.get('buy_volume', 0) + m.get('sell_volume', 0)
-    m['cvd_pct'] = (m.get('abv_delta', 0) / total_active_vol * 100) if total_active_vol else 0
+    total_active_vol = (m.get('buy_volume') or 0) + (m.get('sell_volume') or 0)
+    
+    # CVD defaults to None if no data, else calculates
+    if m.get('abv_delta') is not None and total_active_vol > 0:
+        m['cvd_pct'] = (m.get('abv_delta') / total_active_vol * 100)
+    else:
+        m['cvd_pct'] = None
     m['cvd_sign'] = 1 if m.get('abv_delta', 0) > 0 else -1
     m['cvd_small'] = abs(m['cvd_pct']) < 1.0 
 
-    total_trades = m.get('buy_trades', 0) + m.get('sell_trades', 0)
-    m['dtrades_pct'] = (m.get('trades_delta', 0) / total_trades * 100) if total_trades else 0
+    # Trades: Propagate None
+    b_trades = m.get('buy_trades')
+    s_trades = m.get('sell_trades')
+    
+    if b_trades is not None and s_trades is not None:
+        total_trades = b_trades + s_trades
+        m['dtrades_pct'] = (m.get('trades_delta', 0) / total_trades * 100) if total_trades else 0
+    else:
+        total_trades = None
+        m['dtrades_pct'] = None
     
     sign_abv = (m.get('abv_delta', 0) > 0) - (m.get('abv_delta', 0) < 0)
     sign_trades = (m.get('trades_delta', 0) > 0) - (m.get('trades_delta', 0) < 0)
     m['ratio_stable'] = (sign_abv == sign_trades)
 
-    m['avg_trade_buy'] = (m.get('buy_volume', 0) / m.get('buy_trades', 0)) if m.get('buy_trades', 0) else 0
-    m['avg_trade_sell'] = (m.get('sell_volume', 0) / m.get('sell_trades', 0)) if m.get('sell_trades', 0) else 0
+    m['avg_trade_buy'] = (m.get('buy_volume') / b_trades) if (m.get('buy_volume') is not None and b_trades) else None
+    m['avg_trade_sell'] = (m.get('sell_volume') / s_trades) if (m.get('sell_volume') is not None and s_trades) else None
     
-    if m['avg_trade_buy'] > 0:
+    if m.get('avg_trade_buy') and m.get('avg_trade_sell'):
         m['tilt_pct'] = ((m['avg_trade_sell'] / m['avg_trade_buy']) - 1) * 100
     else:
-        m['tilt_pct'] = 0
+        m['tilt_pct'] = None
 
     m['implied_price'] = (m.get('volume', 0) / total_active_vol) if total_active_vol else 0
     m['dpx'] = m['price_sign'] * m['cvd_sign'] 
@@ -331,7 +373,10 @@ def calculate_metrics(raw_data, config):
     else: m['price_vs_delta'] = "neutral"
 
     # 3. Open Interest Calculations
-    m['doi_pct'] = ((m.get('oi_close', 0) - m.get('oi_open', 0)) / m.get('oi_open', 0) * 100) if m.get('oi_open', 0) else 0
+    if m.get('oi_open') and m.get('oi_close') is not None:
+         m['doi_pct'] = ((m.get('oi_close') - m.get('oi_open')) / m.get('oi_open') * 100)
+    else:
+         m['doi_pct'] = None
     
     oi_rng = m.get('oi_high', 0) - m.get('oi_low', 0)
     if oi_rng == 0: m['oipos'] = 0.5
@@ -339,19 +384,48 @@ def calculate_metrics(raw_data, config):
         raw_pos = (m.get('oi_close', 0) - m.get('oi_low', 0)) / oi_rng
         m['oipos'] = max(0.0, min(1.0, raw_pos))
 
-    up_move = abs(m.get('oi_high', 0) - m.get('oi_open', 0))
-    dn_move = abs(m.get('oi_low', 0) - m.get('oi_open', 0))
-    if up_move > dn_move: m['oi_path'] = "up"
-    elif dn_move > up_move: m['oi_path'] = "down"
-    else: m['oi_path'] = "neutral"
+    # OI Path & OE (Restored & Safe)
+    oh = m.get('oi_high')
+    ol = m.get('oi_low')
+    oo = m.get('oi_open')
+    
+    if oh is not None and ol is not None and oo is not None:
+        up_move = abs(oh - oo)
+        dn_move = abs(ol - oo)
+        if up_move > dn_move: m['oi_path'] = "up"
+        elif dn_move > up_move: m['oi_path'] = "down"
+        else: m['oi_path'] = "neutral"
+    else:
+        m['oi_path'] = None
 
-    m['oe'] = abs(m['doi_pct']) / abs(m['change_pct']) if abs(m.get('change_pct', 0)) > 0 else 0
+    c_pct = m.get('change_pct')
+    # If change_pct came as 0.0 (from text parsing) but we have absolute change, recalculate precision
+    if (c_pct == 0 or c_pct is None) and m.get('change_abs') and m.get('close'):
+         c_pct = abs(m['change_abs']) / m['close'] * 100 * (1 if m.get('price_sign', 1) == 1 else -1)
+         m['change_pct'] = c_pct
 
-    # 4. Liquidations
-    total_liq = m.get('liq_long', 0) + m.get('liq_short', 0)
-    m['liq_share_pct'] = (total_liq / m.get('volume', 0) * 100) if m.get('volume', 0) else 0
-    m['limb_pct'] = ((m.get('liq_short', 0) - m.get('liq_long', 0)) / total_liq * 100) if total_liq else 0
-    m['liq_squeeze'] = m['liq_share_pct'] >= config['global_squeeze_limit']
+    if m.get('doi_pct') is not None and c_pct:
+        m['oe'] = abs(m['doi_pct']) / abs(c_pct)
+    else:
+        m['oe'] = None
+
+    # 4. Liquidations: Propagate None
+    liq_l = m.get('liq_long')
+    liq_s = m.get('liq_short')
+    total_liq = None
+    
+    if liq_l is not None and liq_s is not None:
+        total_liq = liq_l + liq_s
+        m['liq_share_pct'] = (total_liq / m.get('volume', 0) * 100) if m.get('volume', 0) else 0
+        m['limb_pct'] = ((liq_s - liq_l) / total_liq * 100) if total_liq else 0
+    else:
+        total_liq = None
+        m['liq_share_pct'] = None
+        m['limb_pct'] = None
+        
+    m['liq_squeeze'] = (m['liq_share_pct'] >= config['global_squeeze_limit']) if m.get('liq_share_pct') is not None else False
+
+
 
     # 5. Dominant Reject
     LT, UT, Body, CLV = m['lower_tail_pct'], m['upper_tail_pct'], m['body_pct'], m['clv_pct']
@@ -458,17 +532,6 @@ def fetch_and_merge_db(batch_data, config):
         pass 
 
     # 3. Merging
-    # Whitelist of fields that can be updated from Supplementary candles (CoinGlass)
-    SUPPLEMENTARY_FIELDS = {
-        'fr_open', 'fr_high', 'fr_low', 'fr_close',
-        'agg_fr_open', 'agg_fr_high', 'agg_fr_low', 'agg_fr_close',
-        'basis',
-        'ls_ratio_open', 'ls_ratio_high', 'ls_ratio_low', 'ls_ratio_close',
-        'idx_open', 'idx_high', 'idx_low', 'idx_close',
-        'net_longs_open', 'net_longs_close', 'net_longs_delta',
-        'net_shorts_open', 'net_shorts_close', 'net_shorts_delta'
-    }
-
     merged_batch = []
     for new_row in batch_data:
         # Use normalized key
@@ -476,26 +539,16 @@ def fetch_and_merge_db(batch_data, config):
         existing = db_map.get(k)
         
         if existing:
-            # Стратегия слияния (Whitelist + Source Check):
+            # Стратегия слияния:
             combined = existing.copy()
             
-            # Определяем тип входящих данных: это Доп. свеча (CoinGlass) или Основная?
-            # Если есть 'fr_open', считаем это Доп. свечой.
-            is_supp_source = 'fr_open' in new_row
-            
             for key, val in new_row.items():
-                if key in SUPPLEMENTARY_FIELDS:
-                    # Дополнительные поля обновляем ТОЛЬКО если источник - Доп. свеча
-                    if is_supp_source:
-                        combined[key] = val
-                elif not is_supp_source:
-                    # Основные поля (OHLC, Volume, Trades, etc) НЕ трогаем, если источник - Доп. свеча
-                    # Если источник - Основная свеча (не Supp), то обновляем, если в базе пусто
-                    existing_val = combined.get(key)
-                    is_existing_empty = (existing_val is None) or (isinstance(existing_val, (int, float)) and existing_val == 0)
-                    
-                    if is_existing_empty:
-                         combined[key] = val
+                # Обновляем, если в базе пусто
+                existing_val = combined.get(key)
+                is_existing_empty = (existing_val is None) or (isinstance(existing_val, (int, float)) and existing_val == 0)
+                
+                if is_existing_empty:
+                    combined[key] = val
             
             merged_batch.append(combined)
         else:
@@ -554,30 +607,22 @@ def save_candles_batch(candles_data):
     st.error("Не удалось сохранить после нескольких попыток удаления лишних полей.")
     return False
 
-def load_candles_db(limit=500, tf_list=None, date_range=None):
+def load_candles_db(limit=100, start_date=None, end_date=None, tfs=None):
     try:
         query = supabase.table('candles').select("*").order('ts', desc=True)
         
-        # Apply Filters
-        if tf_list:
-            query = query.in_('tf', tf_list)
+        if start_date:
+            query = query.gte('ts', start_date.isoformat())
+        if end_date:
+            # End date inclusive (until end of day)
+            end_dt = datetime.combine(end_date, time(23, 59, 59))
+            query = query.lte('ts', end_dt.isoformat())
             
-        if date_range:
-            # date_range is typically (start_date, end_date) from st.date_input
-            if len(date_range) == 2:
-                start_date, end_date = date_range
-                # Ensure we cover the whole end day
-                import datetime as dt
-                # Convert to string ISO format if they are date objects
-                s_str = start_date.strftime('%Y-%m-%d 00:00:00')
-                e_str = end_date.strftime('%Y-%m-%d 23:59:59')
-                query = query.gte('ts', s_str).lte('ts', e_str)
-            elif len(date_range) == 1:
-                # Single day selected
-                d_str = date_range[0].strftime('%Y-%m-%d')
-                query = query.gte('ts', f"{d_str} 00:00:00").lte('ts', f"{d_str} 23:59:59")
-        
-        # Apply Limit
+        if tfs and len(tfs) > 0:
+            # Case-insensitive filter hack: add both cases
+            tfs_extended = list(set(tfs + [t.upper() for t in tfs] + [t.lower() for t in tfs]))
+            query = query.in_('tf', tfs_extended)
+            
         res = query.limit(limit).execute()
         return pd.DataFrame(res.data) if res.data else pd.DataFrame()
     except Exception as e:
@@ -668,46 +713,162 @@ def generate_full_report(d):
     ]
     return "\n".join(lines)
 
-def generate_cg_report(d):
-    lines = [
-        "Funding Rate:",
-        f"fr_open: {fmt_num(d.get('fr_open'), 6, True)}",
-        f"fr_high: {fmt_num(d.get('fr_high'), 6, True)}",
-        f"fr_low: {fmt_num(d.get('fr_low'), 6, True)}",
-        f"fr_close: {fmt_num(d.get('fr_close'), 6, True)}",
-        "",
-        "Aggregated Funding Rate:",
-        f"agg_fr_open: {fmt_num(d.get('agg_fr_open'), 6, True)}",
-        f"agg_fr_high: {fmt_num(d.get('agg_fr_high'), 6, True)}",
-        f"agg_fr_low: {fmt_num(d.get('agg_fr_low'), 6, True)}",
-        f"agg_fr_close: {fmt_num(d.get('agg_fr_close'), 6, True)}",
-        "",
-        "Basis:",
-        f"basis: {fmt_num(d.get('basis'))}",
-        "",
-        "Long/Short Ratio:",
-        f"ls_ratio_open: {fmt_num(d.get('ls_ratio_open'))}",
-        f"ls_ratio_high: {fmt_num(d.get('ls_ratio_high'))}",
-        f"ls_ratio_low: {fmt_num(d.get('ls_ratio_low'))}",
-        f"ls_ratio_close: {fmt_num(d.get('ls_ratio_close'))}",
-        "",
-        "Index Price:",
-        f"idx_open: {fmt_num(d.get('idx_open'))}",
-        f"idx_high: {fmt_num(d.get('idx_high'))}",
-        f"idx_low: {fmt_num(d.get('idx_low'))}",
-        f"idx_close: {fmt_num(d.get('idx_close'))}",
-        "",
-        "Net Longs:",
-        f"net_longs_open: {fmt_num(d.get('net_longs_open'), 0)}",
-        f"net_longs_close: {fmt_num(d.get('net_longs_close'), 0)}",
-        f"net_longs_delta: {fmt_num(d.get('net_longs_delta'), 0)}",
-        "",
-        "Net Shorts:",
-        f"net_shorts_open: {fmt_num(d.get('net_shorts_open'), 0)}",
-        f"net_shorts_close: {fmt_num(d.get('net_shorts_close'), 0)}",
-        f"net_shorts_delta: {fmt_num(d.get('net_shorts_delta'), 0)}"
-    ]
-    return "\n".join(lines)
+
+# --- 📊 ЛОГИКА КОМПОЗИТА (COMPOSITE) ---
+def generate_composite_report(candles_list):
+    """
+    Считает взвешенный по объему (Volume) отчет для группы свечей.
+    """
+    # Минимум 3 биржи для расчета
+    if not candles_list or len(candles_list) < 3: return None
+
+    # Пороги (как в Google Sheets)
+    THRESH = {
+        'CVD': 1.0, 'TR': 0.5, 'TILT': 2.0,
+        'DOI': 0.5, 'LIQ_HIGH': 0.30, 'LIQ_LOW': 0.10
+    }
+
+    # Tracking missing data for report warning
+    missing_data_report = {}
+
+    def get_val(d, key):
+        v = d.get(key)
+        # Return None if not numeric number (None is preserved)
+        if v is None: return None
+        return v if (isinstance(v, (int, float)) and not math.isnan(v)) else None
+
+    def sign_char(val, thr):
+        if val is None: return '?'
+        if abs(val) < thr: return '0'
+        return '+' if val > 0 else '-'
+
+    def dispersion(values, thr):
+        valid_vals = [v for v in values if v is not None]
+        signs = set()
+        for v in valid_vals:
+            if v > thr: signs.add(1)
+            elif v < -thr: signs.add(-1)
+        return "смешанный" if (1 in signs and -1 in signs) else "ок"
+
+    # 2. Взвешенное среднее (Smart Weighting)
+    def weighted(key, metric_name_for_report):
+        valid_candles = []
+        missing_exchanges = []
+        
+        for c in candles_list:
+            if get_val(c, key) is not None:
+                valid_candles.append(c)
+            else:
+                missing_exchanges.append(c.get('exchange', 'Unknown'))
+        
+        # Log missing exchanges if any found
+        if missing_exchanges:
+            missing_data_report[metric_name_for_report] = missing_exchanges
+
+        if not valid_candles: return None
+        
+        subset_vol = sum(get_val(c, 'volume') for c in valid_candles)
+        if subset_vol == 0: return None
+        
+        return sum(get_val(c, key) * get_val(c, 'volume') for c in valid_candles) / subset_vol
+
+    # 3. Расчет метрик
+    comp = {
+        'cvd':  weighted('cvd_pct', 'CVD'),
+        'tr':   weighted('dtrades_pct', 'Trades'),
+        'tilt': weighted('tilt_pct', 'Tilt'),
+        'doi':  weighted('doi_pct', 'Delta OI'),
+        'liq':  weighted('liq_share_pct', 'Liquidation'),
+        'clv':  weighted('clv_pct', 'CLV'),
+        'upper': weighted('upper_tail_pct', 'Upper Tail'),
+        'lower': weighted('lower_tail_pct', 'Lower Tail'),
+        'body':  weighted('body_pct', 'Body')
+    }
+
+    # 4. Интерпретация (Safe Evaluation)
+    def safe_fmt(val, dec=2):
+        return f"{val:.{dec}f}%" if val is not None else "—"
+
+    if comp['liq'] is not None:
+        if comp['liq'] > THRESH['LIQ_HIGH']: liq_eval = 'ведут ликвидации'
+        elif comp['liq'] <= THRESH['LIQ_LOW']: liq_eval = 'фон'
+        else: liq_eval = 'умеренно'
+    else: liq_eval = '—'
+
+    if comp['tilt'] is not None:
+        if comp['tilt'] >= THRESH['TILT']: tilt_int = 'sell тяжелее'
+        elif comp['tilt'] <= -THRESH['TILT']: tilt_int = 'buy тяжелее'
+        else: tilt_int = 'нейтр'
+    else: tilt_int = '—'
+
+    if comp['clv'] is not None:
+        if comp['clv'] >= 70: clv_int = 'принятие сверху'
+        elif comp['clv'] <= 30: clv_int = 'принятие снизу'
+        else: clv_int = 'середина диапазона'
+    else: clv_int = '—'
+
+    # Liq Tilt Sums
+    ll_vals = [get_val(c, 'liq_long') for c in candles_list]
+    ls_vals = [get_val(c, 'liq_short') for c in candles_list]
+    sum_ll = sum(v for v in ll_vals if v is not None)
+    sum_ls = sum(v for v in ls_vals if v is not None)
+    
+    # Check if we have ANY valid liquidation data
+    has_liq_data = any(v is not None for v in ll_vals) or any(v is not None for v in ls_vals)
+    
+    if has_liq_data:
+        liq_tilt = 'Long доминируют' if sum_ll > sum_ls else ('Short доминируют' if sum_ls > sum_ll else 'сбалансировано')
+    else:
+        liq_tilt = '—'
+
+    disp_cvd = dispersion([get_val(c, 'cvd_pct') for c in candles_list], THRESH['CVD'])
+    disp_doi = dispersion([get_val(c, 'doi_pct') for c in candles_list], THRESH['DOI'])
+
+    # Детализация по биржам
+    def fmt_item(c, key, thr):
+        val = get_val(c, key)
+        if val is None: return f"{c.get('exchange','?')} —"
+        sign = '(+)' if val > thr else ('(−)' if val < -thr else '(0)')
+        return f"{c.get('exchange','?')} {val:.2f}% {sign}"
+
+    per_cvd = "; ".join([fmt_item(c, 'cvd_pct', THRESH['CVD']) for c in candles_list])
+    per_tr  = "; ".join([fmt_item(c, 'dtrades_pct', THRESH['TR']) for c in candles_list])
+    per_doi = "; ".join([fmt_item(c, 'doi_pct', THRESH['DOI']) for c in candles_list])
+
+    instr = candles_list[0].get('raw_symbol', 'Unknown')
+
+    tf = candles_list[0].get('tf', '-')
+    exchanges_str = ", ".join([c.get('exchange','?') for c in candles_list])
+
+    report = f"""КОМПОЗИТНАЯ СВОДКА
+• Инструмент/TF: {instr} / {tf} • Биржи: {len(candles_list)} ({exchanges_str})
+
+1) CVD (дельта активного объёма):
+   - Композит: {safe_fmt(comp['cvd'])} , знак: {sign_char(comp['cvd'], THRESH['CVD'])} [дисперсия: {disp_cvd}]
+   - По биржам: {per_cvd}
+2) Δ по числу сделок (Trades):
+   - Композит: {safe_fmt(comp['tr'])} , знак: {sign_char(comp['tr'], THRESH['TR'])}
+   - По биржам: {per_tr}
+3) Перекос среднего размера сделки (Tilt, sell vs buy):
+   - Композит: {safe_fmt(comp['tilt'])} , интерпретация: {tilt_int}
+4) Ликвидации:
+   - Доля: {safe_fmt(comp['liq'])} • Перекос: {liq_tilt} • Оценка: {liq_eval}
+5) Open Interest:
+   - Композит ΔOI%: {safe_fmt(comp['doi'])} , знак: {sign_char(comp['doi'], THRESH['DOI'])} [дисперсия: {disp_doi}]
+   - По биржам: {per_doi}
+
+6) Геометрия свечи:
+   - CLV: {safe_fmt(comp['clv'])} ({clv_int})
+   - Тени: верхняя {safe_fmt(comp['upper'])} / нижняя {safe_fmt(comp['lower'])}
+   - Тело: {safe_fmt(comp['body'])}
+"""
+    # Warning Section Append
+    if missing_data_report:
+        report += "\n⚠️ ВНИМАНИЕ: Неполные данные\n"
+        for metric, bad_exchanges in missing_data_report.items():
+            report += f"• {metric}: {', '.join(bad_exchanges)} (исключен)\n"
+
+    return report
 
 # --- 🖥 UI ---
 st.title("🖤 VANTA")
@@ -793,43 +954,133 @@ with tab1:
             # --- DB MERGE (ENRICHMENT) ---
             final_batch_list = fetch_and_merge_db(local_batch, config)
             
-            processed_batch = []
-            
+            # 1. Сначала рассчитываем метрики для ВСЕХ свечей
+            temp_all_candles = []
             for raw_data in final_batch_list:
                 full_data = calculate_metrics(raw_data, config)
                 
-                # Logic: Check for Main Data (Active Volume) and Supplementary Data (Funding Rate)
+                # Генерация базовых отчетов
                 has_main = raw_data.get('buy_volume', 0) != 0
-                has_supp = 'fr_open' in raw_data
                 
-                # 1. X-RAY Report (Requires Main Data)
-                if has_main:
-                    full_data['x_ray'] = generate_full_report(full_data)
-                else:
-                    full_data['x_ray'] = None
+                if has_main: full_data['x_ray'] = generate_full_report(full_data)
+                else: full_data['x_ray'] = None
                 
-                # 2. CoinGlass Report
-                cg_text = generate_cg_report(full_data) if has_supp else ""
-                
-                if has_main and has_supp:
-                    # Both: X-RAY + CoinGlass
-                    full_data['x_ray_coinglass'] = full_data['x_ray'] + "\n\n" + cg_text
-                elif has_supp and not has_main:
-                    # Supp Only: Just CoinGlass
-                    full_data['x_ray_coinglass'] = cg_text
-                else:
-                    # Main Only: x_ray_coinglass is None
-                    full_data['x_ray_coinglass'] = None
-                
-                processed_batch.append(full_data)
-            
-            st.session_state.processed_batch = processed_batch
+                temp_all_candles.append(full_data)
 
+            # 2. Группировка и Валидация (Строгий Режим)
+            final_save_list = []
+            orphan_errors = [] # Errors list
+            
+            def get_comp_key(r):
+                # Normalize TS to minutes: 2025-12-17T13:00:00 -> 2025-12-17 13:00
+                ts = str(r.get('ts', '')).replace('T', ' ')[:16]
+                sym = str(r.get('symbol_clean', '')).upper()
+                tf = str(r.get('tf', '')).upper()
+                return (ts, sym, tf)
+
+            # Группируем
+            comp_groups = {}
+            for row in temp_all_candles:
+                grp_key = get_comp_key(row)
+                if grp_key not in comp_groups: comp_groups[grp_key] = []
+                comp_groups[grp_key].append(row)
+            
+            # Разделяем на Валидные (с Binance) и Сироты
+            valid_groups = []
+            orphans_groups = []
+
+            for key, group in comp_groups.items():
+                has_binance = any(c['exchange'] == 'Binance' for c in group)
+                if has_binance:
+                    valid_groups.append(group)
+                else:
+                    orphans_groups.append(group)
+            
+            # Если есть сироты -> Блокирующая ошибка
+            if orphans_groups:
+                for grp in orphans_groups:
+                    orphan = grp[0] # Take representative
+                    # Пытаемся найти "пару", чтобы объяснить ошибку
+                    best_match = None
+                    min_diff = 3 # Max diff traits
+                    
+                    o_ts = get_comp_key(orphan)[0]
+                    o_sym = get_comp_key(orphan)[1]
+                    o_tf = get_comp_key(orphan)[2]
+
+                    for v_grp in valid_groups:
+                        target = next((c for c in v_grp if c['exchange'] == 'Binance'), v_grp[0])
+                        t_ts = get_comp_key(target)[0]
+                        t_sym = get_comp_key(target)[1]
+                        t_tf = get_comp_key(target)[2]
+                        
+                        curr_diff = 0
+                        if o_ts != t_ts: curr_diff += 1
+                        if o_sym != t_sym: curr_diff += 1
+                        if o_tf != t_tf: curr_diff += 1
+                        
+                        if curr_diff < min_diff:
+                            min_diff = curr_diff
+                            best_match = target
+                    
+                    err_msg = f"• {orphan.get('exchange')} {o_sym} {o_ts}"
+                    if best_match:
+                        reasons = []
+                        bm_ts = get_comp_key(best_match)[0]
+                        bm_sym = get_comp_key(best_match)[1]
+                        bm_tf = get_comp_key(best_match)[2]
+
+                        if o_ts != bm_ts: reasons.append(f"Время ({o_ts} vs {bm_ts})")
+                        if o_sym != bm_sym: reasons.append(f"Тикер ({o_sym} vs {bm_sym})")
+                        if o_tf != bm_tf: reasons.append(f"ТФ ({o_tf} vs {bm_tf})")
+                        
+                        err_msg += f" -> Не совпало с Binance: {', '.join(reasons)}"
+                    else:
+                        err_msg += " -> Не найдено пары на Binance (проверьте все параметры)"
+                    
+                    orphan_errors.append(err_msg)
+                
+                # Не пускаем дальше сохранять
+                st.session_state.processed_batch = [] 
+                st.session_state.validation_errors = orphan_errors 
+            else:
+                # Все чисто - обрабатываем валидные группы
+                st.session_state.validation_errors = []
+                
+                for group in valid_groups:
+                    # 2.1 Ищем целевую свечу (Binance)
+                    target_candle = next((c for c in group if c['exchange'] == 'Binance'), None)
+                    
+                    # (Fallback теоретически не нужен раз мы здесь, но на всякий)
+                    if not target_candle: target_candle = group[0]
+
+                    if target_candle:
+                        # 2.2 Проверяем, набралось ли 3 уникальных биржи для Композита
+                        unique_exchanges = set(r['exchange'] for r in group)
+                        
+                        if len(unique_exchanges) >= 3:
+                            # Считаем композит по ВСЕЙ группе
+                            comp_report = generate_composite_report(group)
+                            target_candle['x_ray_composite'] = comp_report
+                        
+                        # 2.3 Добавляем только целевую свечу
+                        final_save_list.append(target_candle)
+            
+                # Обновляем состояние сессии отфильтрованным списком
+                st.session_state.processed_batch = final_save_list
+
+    # ERROR BLOCK
+    if 'validation_errors' in st.session_state and st.session_state.validation_errors:
+        st.error("⛔️ ОШИБКА ВАЛИДАЦИИ КОМПОЗИТА")
+        st.warning("Обнаружены данные других бирж, которые не совпали с Binance. Сохранение заблокировано.")
+        for msg in st.session_state.validation_errors:
+            st.code(msg, language="text")
+            
     if 'processed_batch' in st.session_state and st.session_state.processed_batch:
         batch = st.session_state.processed_batch
         
         # Save Button at the very top of the section
-        if st.button(f"💾 Сохранить {len(batch)} свечей", type="primary"):
+        if st.button(f"💾 Сохранить {len(batch)} свечей (Binance)", type="primary"):
             if save_candles_batch(batch):
                 st.success("Сохранено!")
                 st.cache_data.clear()
@@ -845,38 +1096,41 @@ with tab1:
                 ts_str = str(full_data.get('ts'))
             
             # Minimalist Header in Expander Label
-            label = f"{ts_str} · {full_data.get('exchange')} · {full_data.get('symbol_clean')} · {full_data.get('tf')} · O {fmt_num(full_data.get('open'))}"
+            warn_icon = " ⚠️" if full_data.get('missing_fields') else ""
+            label = f"{ts_str} · {full_data.get('exchange')} · {full_data.get('symbol_clean')} · {full_data.get('tf')} · O {fmt_num(full_data.get('open'))}{warn_icon}"
             
             with st.expander(label):
+                if full_data.get('missing_fields'):
+                    st.warning(f"Не найдены поля: {', '.join(full_data['missing_fields'])}")
+                
                 with st.container(height=300):
-                    # Logic to display exactly what is available
-                    if full_data.get('x_ray_coinglass'):
-                         # If this is present, it's either "Supp Only" (CG only) OR "Both" (XRAY+CG)
-                         st.code(full_data['x_ray_coinglass'], language="yaml")
-                    elif full_data.get('x_ray'):
-                         # If x_ray_coinglass is None, but x_ray is present (Main Only)
+                    if full_data.get('x_ray'):
                          st.code(full_data['x_ray'], language="yaml")
 
 with tab2:
     
-    # 1. Filters Toolbar
-    with st.expander("🔎 Фильтры поиска", expanded=True):
-        f_col1, f_col2, f_col3 = st.columns([1, 3, 1])
+    # 0. Filters Toolbar
+    f1, f2, f3 = st.columns([2, 2, 1])
+    
+    with f1:
+        # TF Multiselect
+        all_tfs = ["1m", "5m", "15m", "1h", "4h", "1d", "1w"]
+        selected_tfs = st.multiselect("Таймфреймы", all_tfs, default=[], placeholder="Все TF", label_visibility="collapsed")
         
-        with f_col1:
-            # Common TFs
-            tfs = ['1m', '5m', '15m', '1H', '4H', '1D', '1W', '1M']
-            selected_tfs = st.multiselect("TF:", options=tfs, default=[], placeholder="Все")
-        
-        with f_col2:
-            # Date Input with RU format
-            selected_dates = st.date_input("Диапазон дат:", value=[], format="DD.MM.YYYY", help="Выберите начальную и конечную дату")
+    with f2:
+        # Date Range Picker
+        date_range = st.date_input("Период", value=[], label_visibility="collapsed")
+        start_d, end_d = None, None
+        if len(date_range) == 2:
+            start_d, end_d = date_range
+        elif len(date_range) == 1:
+            start_d = date_range[0]
             
-        with f_col3:
-            limit_rows = st.selectbox("Лимит:", [100, 500, 1000, 5000], index=1)
+    with f3:
+        limit_rows = st.number_input("Limit", value=100, min_value=1, step=50, label_visibility="collapsed")
 
-    # 2. Load Data with Filters
-    df = load_candles_db(limit=limit_rows, tf_list=selected_tfs, date_range=selected_dates)
+    # 1. Load Data
+    df = load_candles_db(limit=limit_rows, start_date=start_d, end_date=end_d, tfs=selected_tfs)
 
     if not df.empty:
         if 'note' not in df.columns: df['note'] = ""
@@ -884,42 +1138,67 @@ with tab2:
         # Convert TS
         df['ts'] = pd.to_datetime(df['ts'], errors='coerce')
 
-        # 3. Toolbar (Save / Delete)
-        c1, c2 = st.columns([0.25, 0.75])
+        # 2. Controls Toolbar (Top)
+        # 2. Controls Toolbar (Top)
+        c1, c2, c3 = st.columns([0.2, 0.2, 0.6], vertical_alignment="bottom")
         
         # SAVE BUTTON
         with c1:
-             if st.button("💾 Сохранить изменения", key="btn_save_top", type="primary"):
-                  if "db_editor" in st.session_state and "edited_rows" in st.session_state["db_editor"]:
-                      changes_map = st.session_state["db_editor"]["edited_rows"]
-                      if changes_map:
-                          count = 0
-                          for idx, changes in changes_map.items():
-                              valid_changes = {k: v for k, v in changes.items() if k != 'delete'}
-                              if valid_changes:
-                                  # Get ID from the original dataframe (careful with index if sorted)
-                                  # st.data_editor uses the provided df index. 
-                                  # If we filter or range, we must be consistent.
-                                  # df is fresh from DB, so idx corresponds to this page's df.
-                                  row_id = df.iloc[idx]['id']
-                                  update_candle_db(row_id, valid_changes)
-                                  count += 1
-                          if count > 0:
-                              st.toast(f"✅ Обновлено {count} свечей")
-                              st.cache_data.clear()
-                              st.rerun()
-                          else:
-                              st.info("Нет смысловых изменений.")
-                      else:
-                          st.info("Нет изменений.")
+             if st.button("💾 Сохранить", key="btn_save_top", type="primary"):
+                 if "db_editor" in st.session_state and "edited_rows" in st.session_state["db_editor"]:
+                     changes_map = st.session_state["db_editor"]["edited_rows"]
+                     if changes_map:
+                         count = 0
+                         for idx, changes in changes_map.items():
+                             valid_changes = {k: v for k, v in changes.items() if k != 'delete'}
+                             if valid_changes:
+                                 row_id = df.iloc[idx]['id']
+                                 update_candle_db(row_id, valid_changes)
+                                 count += 1
+                         if count > 0:
+                             st.toast(f"✅ Обновлено {count} свечей")
+                             st.cache_data.clear()
+                             st.rerun()
+                         else:
+                             st.info("Нет смысловых изменений.")
+                     else:
+                         st.info("Нет изменений.")
         
-        # SELECT ALL CHECKBOX
+        # DELETE BUTTON
         with c2:
-             st.write("") # spacer
-             if st.checkbox("Выделить все на этой странице", key="select_all_del_top"):
+            if st.button("🗑 Удалить выделенные", key="btn_del_top", type="secondary"):
+                # Find rows where delete=True in session state
+                ids_to_del = []
+                
+                # 1. Check "Select All" state directly
+                if st.session_state.get("select_all_del_top"):
+                    ids_to_del = df['id'].tolist()
+                
+                # 2. Check individual checkboxes from Data Editor
+                elif "db_editor" in st.session_state and "edited_rows" in st.session_state["db_editor"]:
+                    changes_map = st.session_state["db_editor"]["edited_rows"]
+                    for idx, changes in changes_map.items():
+                         if changes.get("delete") is True:
+                             # Ensure idx is valid for current df
+                             if idx < len(df):
+                                 ids_to_del.append(df.iloc[idx]['id'])
+
+                ids_to_del = list(set(ids_to_del))
+
+                if ids_to_del:
+                    if delete_candles_db(ids_to_del):
+                        st.toast(f"Удалено {len(ids_to_del)} записей!")
+                        st.cache_data.clear()
+                        st.rerun()
+                else:
+                    st.warning("Ничего не выделено.")
+
+        # SELECT ALL CHECKBOX
+        with c3:
+             if st.checkbox("Выделить все", key="select_all_del_top"):
                   df['delete'] = True
 
-        visible_cols = ['ts', 'tf', 'x_ray', 'x_ray_coinglass', 'x_ray_composite', 'note', 'raw_data']
+        visible_cols = ['ts', 'tf', 'x_ray', 'x_ray_composite', 'note', 'raw_data']
         
         # 4. Data Editor
         edited_df = st.data_editor(
@@ -928,26 +1207,16 @@ with tab2:
             column_order=["delete"] + visible_cols,
             use_container_width=True,
             hide_index=True,
-            height=800, # Increased height
+            height=800,
             column_config={
-                "delete": st.column_config.CheckboxColumn("🗑", default=False, width="small"),
-                "ts": st.column_config.DatetimeColumn("Time", format="DD.MM.YYYY HH:mm", width="small", disabled=True),
-                "tf": st.column_config.TextColumn("tf", width="small", disabled=True),
-                "x_ray": st.column_config.TextColumn("X-RAY", width="small"),
-                "x_ray_coinglass": st.column_config.TextColumn("CG Report", width="small"),
-                "x_ray_composite": st.column_config.TextColumn("Composite", width="small"),
-                "note": st.column_config.TextColumn("Note ✏️", width="medium"),
+                "delete": st.column_config.CheckboxColumn("🗑", default=False, width=40),
+                "ts": st.column_config.DatetimeColumn("Time", format="DD.MM.YYYY HH:mm", width="small"),
+                "x_ray": st.column_config.TextColumn("X-RAY", width="medium"),
+                "x_ray_composite": st.column_config.TextColumn("Composite", width="medium"),
+                "note": st.column_config.TextColumn("Note ✏️", width="small"),
                 "raw_data": st.column_config.TextColumn("Raw", width="large"),
             }
         )
         
-        # DELETE BUTTON (Below Table)
-        to_delete = edited_df[edited_df.delete == True]
-        if not to_delete.empty:
-            if st.button(f"🗑 Удалить {len(to_delete)} выделенных", key="btn_del_bottom", type="secondary"):
-                if delete_candles_db(to_delete['id'].tolist()):
-                    st.toast("Удалено!")
-                    st.cache_data.clear()
-                    st.rerun()
     else:
-        st.info("База данных пуста (или на этой странице нет данных).")
+        st.info("База данных пуста.")
