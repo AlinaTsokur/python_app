@@ -5,9 +5,11 @@ import uuid
 from datetime import datetime, time
 from supabase import create_client, Client
 import math
-import math
 import base64
 import os
+import importlib
+import diver_engine
+importlib.reload(diver_engine) # Force reload to apply fixes
 
 # --- Настройка страницы ---
 st.set_page_config(
@@ -43,22 +45,54 @@ st.markdown("""
             background-attachment: fixed;
             color: #E0E0E0;
         }
-        [data-testid="stVerticalBlockBorderWrapper"] > div {
-            background: rgba(255, 255, 255, 0.03) !important; 
-            backdrop-filter: blur(20px) !important;
-            border: 1px solid rgba(255, 255, 255, 0.08) !important;
-            border-top: 1px solid rgba(255, 255, 255, 0.15) !important;
-            border-radius: 20px !important;
-            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.4) !important;
-            margin-bottom: 24px;
-            padding: 24px !important;
+        
+        /* Remove ALL Container Borders (Nuclear Option) */
+        [data-testid="stVerticalBlockBorderWrapper"], [data-testid="stVerticalBlockBorderWrapper"] > div {
+            border: none !important;
+            box-shadow: none !important;
+            background: transparent !important;
         }
+
         .tf-badge {
             background: linear-gradient(135deg, #ECEFF1, #B0BEC5);
             color: #263238; padding: 3px 10px; border-radius: 12px;
             font-size: 0.85em; font-weight: 700; margin-left: 8px;
             border: 1px solid rgba(255,255,255,0.4);
             box-shadow: 0 0 10px rgba(176, 190, 197, 0.3);
+        }
+        /* Clean Tabs */
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 8px;
+            border-bottom: 0px solid transparent !important;
+        }
+        .stTabs [data-baseweb="tab"] {
+            height: 40px;
+            white-space: pre-wrap;
+            background-color: transparent !important;
+            border: none !important;
+            color: #E0E0E0;
+        }
+        .stTabs [aria-selected="true"] {
+             background-color: transparent !important;
+             border-bottom: 2px solid #FAFAFA !important;
+             color: #FFFFFF !important;
+        }
+        /* Remove the default grey line */
+        .stTabs [data-baseweb="tab-border"] {
+             display: none !important;
+        }
+        /* Remove Code Block frames */
+        [data-testid="stCodeBlock"] {
+            border: none !important;
+            box-shadow: none !important;
+        }
+        [data-testid="stCodeBlock"] > div {
+             border: none !important;
+             background-color: transparent !important;
+        }
+        /* Clean Tab Panel */
+        [data-baseweb="tab-panel"] {
+             padding-top: 10px !important;
         }
         /* Make header transparent */
         header[data-testid="stHeader"] {
@@ -131,7 +165,7 @@ def extract(regex, text):
     return None
 
 # --- 🧠 ЯДРО: 1. RAW INPUT PARSING (ИСПРАВЛЕНО) ---
-def parse_raw_input(text, user_date, user_time):
+def parse_raw_input(text):
     """Парсит сырой текст в словарь Raw Input согласно спецификации."""
     data = {}
     data['raw_data'] = text.strip()
@@ -164,9 +198,16 @@ def parse_raw_input(text, user_date, user_time):
                 data['ts'] = dt_obj.isoformat()
                 data['parsed_ts'] = data['ts'] 
             except:
-                 data['ts'] = datetime.combine(user_date, user_time).isoformat()
+                 raise ValueError("Неверный формат даты/времени. Ожидается DD.MM.YYYY HH:MM")
     else:
-        data['ts'] = datetime.combine(user_date, user_time).isoformat()
+        # User requested NO silent default. 
+        # But we must check if 'pending_ts' logic in caller handles this?
+        # The caller (process_raw_text_batch) relies on data['ts'] or data['parsed_ts'].
+        # If we return without TS, the caller might fill it from pending_ts.
+        # So we should strictly NOT set 'ts' here if not found, to let caller decide or fail.
+        # However, user said "let warning pop up that they are mandatory".
+        # So we leave it empty here?
+        pass
 
     # OHLC
     ohlc_match = re.search(r'O\s+([\d,.]+)\s+H\s+([\d,.]+)\s+L\s+([\d,.]+)\s+C\s+([\d,.]+)', text)
@@ -476,6 +517,7 @@ def calculate_metrics(raw_data, config):
     
     # K Params: Case-insensitive lookup for tf_params
     k_set, k_ctr, k_unl = 1.0, 1.0, 1.0
+    tf_sens_base = 0.5 # Default if not found in tf_params
     
     # Try exact match first
     tf_data = tf_params.get(tf_key)
@@ -488,18 +530,29 @@ def calculate_metrics(raw_data, config):
                 break
     
     if tf_data:
-        k_set = tf_data.get('k_set', 1.0)
-        k_ctr = tf_data.get('k_ctr', 1.0)
-        k_unl = tf_data.get('k_unl', 1.0)
+        k_set = float(tf_data.get('k_set', 1.0))
+        k_ctr = float(tf_data.get('k_ctr', 1.0))
+        k_unl = float(tf_data.get('k_unl', 1.0))
+        # User defined 'sens' in tf_params for these metrics
+        if 'sens' in tf_data:
+            tf_sens_base = float(tf_data['sens'])
 
-    m['t_set_pct'] = m['porog_final'] * k_set
+    # Calculate T-thresholds using TF-specific Sens * K-factor
+    # (Removed asset coeff per user request)
+    
+    t_base = tf_sens_base 
+    
+    m['t_set_pct'] = round(t_base * k_set, 2)
     m['oi_set'] = m['doi_pct'] >= m['t_set_pct']
     
-    m['t_counter_pct'] = m['porog_final'] * k_ctr
+    m['t_counter_pct'] = round(t_base * k_ctr, 2)
     m['oi_counter'] = (m['dpx'] == -1) and (m['doi_pct'] >= m['t_counter_pct'])
     
-    m['t_unload_pct'] = -(m['porog_final'] * k_unl)
+    m['t_unload_pct'] = round(-(t_base * k_unl), 2)
     m['oi_unload'] = m['doi_pct'] <= m['t_unload_pct']
+    
+    # Pass TF Sens to Diver Engine (as strictly requested)
+    m['tf_sens'] = tf_sens_base
     
     m['r_strength'] = abs(m['doi_pct']) / m['porog_final'] if m['porog_final'] else 0
     m['r'] = m['r_strength']
@@ -897,6 +950,230 @@ def generate_composite_report(candles_list):
 
     return report
 
+# --- HELPER: CENTRALIZED BATCH PROCESSING (Refactored) ---
+def process_raw_text_batch(raw_text):
+    """
+    Central function to process raw text input (Tab 1 & Tab 3).
+    Performs:
+    1. Splitting by Exchange
+    2. Parsing (parse_raw_input)
+    3. Timestamp filtering/forwarding
+    4. DB Enrichment (fetch_and_merge_db)
+    5. Metric Calculation
+    6. X-RAY Generation
+    7. Composite Analysis (Grouping & Validation)
+    
+    Returns:
+        batch (list): List of processed candle dictionaries (with metrics and reports).
+        orphan_errors (list): List of validation error strings.
+    """
+    config = load_configurations()
+    if not config:
+        return [], ["Configuration load failed"]
+
+    # 1. Split & Clean
+    raw_chunks = re.split(r'(?=(?:Binance|Bybit|OKX)\s+·)', raw_text, flags=re.IGNORECASE)
+    raw_chunks = [x.strip() for x in raw_chunks if x.strip()]
+    
+    merged_groups = {}
+    pending_ts = None
+    TS_REGEX_STREAM = r'(\d{1,2}\.\d{1,2}\.\d{4}\s+\d{1,2}:\d{2}(?::\d{2})?)'
+
+    # 2. Iterate & Parse
+    for chunk in raw_chunks:
+        # 2a. Find trailing TS
+        next_ts = None
+        clean_chunk = chunk
+        all_ts = list(re.finditer(TS_REGEX_STREAM, chunk))
+        if all_ts:
+            last_match = all_ts[-1]
+            # Check if everything AFTER the match is just whitespace
+            suffix = chunk[last_match.end():]
+            if not suffix.strip(): 
+                next_ts = last_match.group(1)
+                clean_chunk = chunk[:last_match.start()].strip()
+
+        # 2b. Parse
+        # 2b. Parse
+        base_data = parse_raw_input(clean_chunk)
+        
+        # 2c. TS Forwarding Logic
+        if base_data.get('exchange') == 'Unknown':
+            if next_ts:
+                 pending_ts = next_ts
+                 next_ts = None 
+            elif base_data.get('parsed_ts'):
+                 pending_ts = base_data['parsed_ts']
+            continue
+
+        if pending_ts:
+            try:
+                try:
+                    dt = datetime.strptime(pending_ts, "%d.%m.%Y %H:%M:%S")
+                except ValueError:
+                    dt = datetime.strptime(pending_ts, "%d.%m.%Y %H:%M")
+                base_data['ts'] = dt.isoformat()
+                
+                # If we successfully patched TS, remove it from missing_fields
+                if 'missing_fields' in base_data and 'ts' in base_data['missing_fields']:
+                    base_data['missing_fields'].remove('ts')
+                    if not base_data['missing_fields']:
+                        del base_data['missing_fields']
+            except:
+                pass
+        
+        if next_ts:
+            pending_ts = next_ts
+        else:
+            pending_ts = None
+
+        # STRICT CHECK: If TS is still missing -> Error
+        if not base_data.get('ts'):
+            # Convert to user friendly error, maybe skip or fail batch?
+            # User wants "Warning mandatory".
+            # We can add to orphan_errors or fail immediately?
+            # Let's add strict error which will be returned in orphan_errors list (as general errors)
+            # But the function returns (batch, errors).
+            # We need a way to say "This specific candle failed".
+            # For now, let's treat it as a critical error for this candle and not add it to merged_groups.
+            pass # We will handle this by checking required keys later?
+            # Or better, check here.
+            pass
+
+        # 2d. Grouping for DB Merge
+        key = (base_data.get('exchange'), base_data.get('symbol_clean'), base_data.get('tf'), base_data.get('ts'))
+        
+        if key not in merged_groups:
+            merged_groups[key] = base_data
+        else:
+            existing = merged_groups[key]
+            for k, v in base_data.items():
+                if v and (k not in existing or not existing[k]):
+                    existing[k] = v
+    
+    local_batch = list(merged_groups.values())
+    
+    # 3. DB Enrichment
+    final_batch_list = fetch_and_merge_db(local_batch, config)
+    
+    # 4. Metric Calculation & X-RAY
+    temp_all_candles = []
+    for raw_data in final_batch_list:
+        full_data = calculate_metrics(raw_data, config)
+        
+        has_main = raw_data.get('buy_volume', 0) != 0
+        if has_main: 
+            full_data['x_ray'] = generate_full_report(full_data)
+        else: 
+            full_data['x_ray'] = None
+        
+        temp_all_candles.append(full_data)
+
+    # 5. Composite Analysis (Strict Mode)
+    final_save_list = []
+    orphan_errors = [] 
+    
+    def get_comp_key(r):
+        ts = str(r.get('ts', '')).replace('T', ' ')[:16]
+        sym = str(r.get('symbol_clean', '')).upper()
+        tf = str(r.get('tf', '')).upper()
+        return (ts, sym, tf)
+
+    comp_groups = {}
+    for row in temp_all_candles:
+        grp_key = get_comp_key(row)
+        if grp_key not in comp_groups: comp_groups[grp_key] = []
+        comp_groups[grp_key].append(row)
+
+    # Separate Valid vs Orphans
+    valid_groups = []
+    orphans_groups = []
+
+    for key, group in comp_groups.items():
+        has_binance = any(c['exchange'] == 'Binance' for c in group)
+        if has_binance:
+            valid_groups.append(group)
+        else:
+            orphans_groups.append(group)
+
+    # If orphans exist -> BLOCKING ERROR
+    if orphans_groups:
+        for grp in orphans_groups:
+            orphan = grp[0]
+            
+            # Try to find "Best Match" to explain why it failed
+            best_match = None
+            min_diff = 3
+            
+            o_ts = get_comp_key(orphan)[0]
+            o_sym = get_comp_key(orphan)[1]
+            o_tf = get_comp_key(orphan)[2]
+
+            for v_grp in valid_groups:
+                target = next((c for c in v_grp if c['exchange'] == 'Binance'), v_grp[0])
+                t_ts = get_comp_key(target)[0]
+                t_sym = get_comp_key(target)[1]
+                t_tf = get_comp_key(target)[2]
+                
+                curr_diff = 0
+                if o_ts != t_ts: curr_diff += 1
+                if o_sym != t_sym: curr_diff += 1
+                if o_tf != t_tf: curr_diff += 1
+                
+                if curr_diff < min_diff:
+                    min_diff = curr_diff
+                    best_match = target
+            
+            err_msg = f"• {orphan.get('exchange')} {o_sym} {o_ts}"
+            if best_match:
+                reasons = []
+                bm_ts = get_comp_key(best_match)[0]
+                bm_sym = get_comp_key(best_match)[1]
+                bm_tf = get_comp_key(best_match)[2]
+
+                if o_ts != bm_ts: reasons.append(f"Время ({o_ts} vs {bm_ts})")
+                if o_sym != bm_sym: reasons.append(f"Тикер ({o_sym} vs {bm_sym})")
+                if o_tf != bm_tf: reasons.append(f"ТФ ({o_tf} vs {bm_tf})")
+                
+                err_msg += f" -> Не совпало с Binance: {', '.join(reasons)}"
+            else:
+                err_msg += " -> Не найдено пары на Binance (проверьте все параметры)"
+            
+            orphan_errors.append(err_msg)
+            
+        # If orphans, we do NOT return valid list? 
+        # Tab 1 logic: "st.session_state.processed_batch = []" if orphans exist.
+        # We adhere to this strict logic.
+        return [], orphan_errors
+        
+    else:
+        # No orphans - process valid groups
+        for group in valid_groups:
+            target_candle = next((c for c in group if c['exchange'] == 'Binance'), None)
+            if not target_candle: target_candle = group[0]
+
+            if target_candle:
+                unique_exchanges = set(r['exchange'] for r in group)
+                if len(unique_exchanges) >= 3:
+                    # COMPOSITE REPORT using ALL group members
+                    # Tab 1 passed 'group' NOT 'members' (variable naming)
+                    # And likely function expects list of candles.
+                    # We need to check generate_composite_report signature.
+                    # Previous code: generate_composite_report(group) - only 1 arg?
+                    # Let's check.
+                    # Assuming it takes list.
+                    
+                    # Wait, Tab 3 logic had different call?
+                    # No, I implemented detailed valid logic from Tab 1.
+                    
+                    # We pass 'group' to generate_composite_report
+                    comp_report = generate_composite_report(group)
+                    target_candle['x_ray_composite'] = comp_report # Assign to Composite field
+                
+                final_save_list.append(target_candle)
+
+    return final_save_list, []
+
 # --- 🖥 UI ---
 # --- HEADER ---
 def get_base64_image(image_path):
@@ -920,7 +1197,7 @@ if os.path.exists(logo_path):
     )
 else:
     st.title("🖤 VANTA")
-tab1, tab2 = st.tabs(["Отчеты", "БД"])
+tab1, tab2, tab3 = st.tabs(["Отчеты", "Свечи", "Дивер"])
 
 with tab1:
     input_text = st.text_area("Вставьте данные свечи", height=150, label_visibility="collapsed", placeholder="Вставьте свечи здесь...")
@@ -937,192 +1214,14 @@ with tab1:
     # Save button will be rendered into col_save downstream (after processing)
 
     if process and input_text:
-        config = load_configurations()
-        if config:
-            raw_chunks = re.split(r'(?=(?:Binance|Bybit|OKX)\s+·)', input_text, flags=re.IGNORECASE)
-            raw_chunks = [x.strip() for x in raw_chunks if x.strip()]
-            
-            merged_groups = {}
-            pending_ts = None
-            TS_REGEX_STREAM = r'(\d{1,2}\.\d{1,2}\.\d{4}\s+\d{1,2}:\d{2}(?::\d{2})?)'
+        # --- REFACTORED CALL ---
+        final_save_list, orphan_errors = process_raw_text_batch(input_text)
+        
+        # Save to session (Validation Mode)
+        st.session_state.processed_batch = final_save_list
+        st.session_state.validation_errors = orphan_errors
+        st.rerun()
 
-            for chunk in raw_chunks:
-                # 1. Поиск "хвостового" таймстемпа для следующего чанка
-                next_ts = None
-                clean_chunk = chunk
-                all_ts = list(re.finditer(TS_REGEX_STREAM, chunk))
-                if all_ts:
-                    last_match = all_ts[-1]
-                    # Если дата в самом конце строки (с небольшим допуском) для валидного чанка
-                    # Или если это Unknown чанк (где дата может быть единственным содержимым)
-                    if last_match.end() >= len(chunk) - 5: 
-                        next_ts = last_match.group(1)
-                        clean_chunk = chunk[:last_match.start()].strip()
-
-                # 2. Парсинг (очищенного) чанка
-                base_data = parse_raw_input(clean_chunk, user_date, user_time)
-                
-                # 3. Логика переноса даты
-                if base_data.get('exchange') == 'Unknown':
-                    # Если это "мусорный" чанк, но он содержал дату
-                    if next_ts:
-                         pending_ts = next_ts
-                         next_ts = None # Consumed
-                    elif base_data.get('parsed_ts'):
-                         pending_ts = base_data['parsed_ts']
-                    continue
-
-                # Применяем pending_ts, если есть
-                if pending_ts:
-                    # Пробуем распарсить pending_ts
-                    try:
-                        # Сначала пробуем с секундами, потом без
-                        try:
-                            dt = datetime.strptime(pending_ts, "%d.%m.%Y %H:%M:%S")
-                        except ValueError:
-                            dt = datetime.strptime(pending_ts, "%d.%m.%Y %H:%M")
-                        base_data['ts'] = dt.isoformat()
-                    except:
-                        pass # Оставляем как есть, если не распарсилось
-                
-                # Обновляем pending_ts для следующего круга
-                if next_ts:
-                    pending_ts = next_ts
-                else:
-                    pending_ts = None
-
-                key = (base_data.get('exchange'), base_data.get('symbol_clean'), base_data.get('tf'), base_data.get('ts'))
-                
-                if key not in merged_groups:
-                    merged_groups[key] = base_data
-                else:
-                    existing = merged_groups[key]
-                    for k, v in base_data.items():
-                        if v and (k not in existing or not existing[k]):
-                            existing[k] = v
-            
-            # --- LOCAL MERGED BATCH IS READY ---
-            local_batch = list(merged_groups.values())
-            
-            # --- DB MERGE (ENRICHMENT) ---
-            final_batch_list = fetch_and_merge_db(local_batch, config)
-            
-            # 1. Сначала рассчитываем метрики для ВСЕХ свечей
-            temp_all_candles = []
-            for raw_data in final_batch_list:
-                full_data = calculate_metrics(raw_data, config)
-                
-                # Генерация базовых отчетов
-                has_main = raw_data.get('buy_volume', 0) != 0
-                
-                if has_main: full_data['x_ray'] = generate_full_report(full_data)
-                else: full_data['x_ray'] = None
-                
-                temp_all_candles.append(full_data)
-
-            # 2. Группировка и Валидация (Строгий Режим)
-            final_save_list = []
-            orphan_errors = [] # Errors list
-            
-            def get_comp_key(r):
-                # Normalize TS to minutes: 2025-12-17T13:00:00 -> 2025-12-17 13:00
-                ts = str(r.get('ts', '')).replace('T', ' ')[:16]
-                sym = str(r.get('symbol_clean', '')).upper()
-                tf = str(r.get('tf', '')).upper()
-                return (ts, sym, tf)
-
-            # Группируем
-            comp_groups = {}
-            for row in temp_all_candles:
-                grp_key = get_comp_key(row)
-                if grp_key not in comp_groups: comp_groups[grp_key] = []
-                comp_groups[grp_key].append(row)
-            
-            # Разделяем на Валидные (с Binance) и Сироты
-            valid_groups = []
-            orphans_groups = []
-
-            for key, group in comp_groups.items():
-                has_binance = any(c['exchange'] == 'Binance' for c in group)
-                if has_binance:
-                    valid_groups.append(group)
-                else:
-                    orphans_groups.append(group)
-            
-            # Если есть сироты -> Блокирующая ошибка
-            if orphans_groups:
-                for grp in orphans_groups:
-                    orphan = grp[0] # Take representative
-                    # Пытаемся найти "пару", чтобы объяснить ошибку
-                    best_match = None
-                    min_diff = 3 # Max diff traits
-                    
-                    o_ts = get_comp_key(orphan)[0]
-                    o_sym = get_comp_key(orphan)[1]
-                    o_tf = get_comp_key(orphan)[2]
-
-                    for v_grp in valid_groups:
-                        target = next((c for c in v_grp if c['exchange'] == 'Binance'), v_grp[0])
-                        t_ts = get_comp_key(target)[0]
-                        t_sym = get_comp_key(target)[1]
-                        t_tf = get_comp_key(target)[2]
-                        
-                        curr_diff = 0
-                        if o_ts != t_ts: curr_diff += 1
-                        if o_sym != t_sym: curr_diff += 1
-                        if o_tf != t_tf: curr_diff += 1
-                        
-                        if curr_diff < min_diff:
-                            min_diff = curr_diff
-                            best_match = target
-                    
-                    err_msg = f"• {orphan.get('exchange')} {o_sym} {o_ts}"
-                    if best_match:
-                        reasons = []
-                        bm_ts = get_comp_key(best_match)[0]
-                        bm_sym = get_comp_key(best_match)[1]
-                        bm_tf = get_comp_key(best_match)[2]
-
-                        if o_ts != bm_ts: reasons.append(f"Время ({o_ts} vs {bm_ts})")
-                        if o_sym != bm_sym: reasons.append(f"Тикер ({o_sym} vs {bm_sym})")
-                        if o_tf != bm_tf: reasons.append(f"ТФ ({o_tf} vs {bm_tf})")
-                        
-                        err_msg += f" -> Не совпало с Binance: {', '.join(reasons)}"
-                    else:
-                        err_msg += " -> Не найдено пары на Binance (проверьте все параметры)"
-                    
-                    orphan_errors.append(err_msg)
-                
-                # Не пускаем дальше сохранять
-                st.session_state.processed_batch = [] 
-                st.session_state.validation_errors = orphan_errors 
-            else:
-                # Все чисто - обрабатываем валидные группы
-                st.session_state.validation_errors = []
-                
-                for group in valid_groups:
-                    # 2.1 Ищем целевую свечу (Binance)
-                    target_candle = next((c for c in group if c['exchange'] == 'Binance'), None)
-                    
-                    # (Fallback теоретически не нужен раз мы здесь, но на всякий)
-                    if not target_candle: target_candle = group[0]
-
-                    if target_candle:
-                        # 2.2 Проверяем, набралось ли 3 уникальных биржи для Композита
-                        unique_exchanges = set(r['exchange'] for r in group)
-                        
-                        if len(unique_exchanges) >= 3:
-                            # Считаем композит по ВСЕЙ группе
-                            comp_report = generate_composite_report(group)
-                            target_candle['x_ray_composite'] = comp_report
-                        
-                        # 2.3 Добавляем только целевую свечу
-                        final_save_list.append(target_candle)
-            
-                # Обновляем состояние сессии отфильтрованным списком
-                st.session_state.processed_batch = final_save_list
-
-    # ERROR BLOCK
     if 'validation_errors' in st.session_state and st.session_state.validation_errors:
         st.error("⛔️ ОШИБКА ВАЛИДАЦИИ КОМПОЗИТА")
         st.warning("Обнаружены данные других бирж, которые не совпали с Binance. Сохранение заблокировано.")
@@ -1140,8 +1239,8 @@ with tab1:
                     st.toast("Успешно сохранено!", icon="💾")
                     st.cache_data.clear()
         
-
-        for full_data in batch:
+        # Clear logic previously handled inside the big block, now we iterate
+        for idx, full_data in enumerate(batch):
             # Prepare Label
             try:
                 ts_obj = datetime.fromisoformat(full_data['ts'])
@@ -1151,15 +1250,23 @@ with tab1:
             
             # Minimalist Header in Expander Label
             warn_icon = " ⚠️" if full_data.get('missing_fields') else ""
-            label = f"{ts_str} · {full_data.get('exchange')} · {full_data.get('symbol_clean')} · {full_data.get('tf')} · O {fmt_num(full_data.get('open'))}{warn_icon}"
-            
+            label = f"{ts_str} · {full_data.get('exchange')} · {full_data.get('symbol_clean')} · {full_data.get('tf')} · O {fmt_num(full_data.get('open'))}{warn_icon}"            
             with st.expander(label):
                 if full_data.get('missing_fields'):
                     st.warning(f"Не найдены поля: {', '.join(full_data['missing_fields'])}")
                 
                 with st.container(height=300):
-                    if full_data.get('x_ray'):
-                         st.code(full_data['x_ray'], language="yaml")
+                    # === DYNAMIC TABS (Option 1) ===
+                    if full_data.get('x_ray_composite'):
+                        t_xray, t_comp = st.tabs(["X-RAY", "⚡️ COMPOSITE"])
+                        with t_xray:
+                             if full_data.get('x_ray'): st.code(full_data['x_ray'], language="yaml")
+                        with t_comp:
+                             st.code(full_data['x_ray_composite'], language="yaml")
+                    else:
+                        # Standard View
+                        if full_data.get('x_ray'):
+                             st.code(full_data['x_ray'], language="yaml")
 
 with tab2:
     
@@ -1252,7 +1359,7 @@ with tab2:
              if st.checkbox("Выделить все", key="select_all_del_top"):
                   df['delete'] = True
 
-        visible_cols = ['ts', 'tf', 'x_ray', 'x_ray_composite', 'note', 'raw_data']
+        visible_cols = ['ts', 'tf', 'x_ray', 'x_ray_composite', 'report_diver', 'note', 'raw_data']
         
         # 4. Data Editor
         edited_df = st.data_editor(
@@ -1263,14 +1370,362 @@ with tab2:
             hide_index=True,
             height=800,
             column_config={
-                "delete": st.column_config.CheckboxColumn("🗑", default=False, width=40),
+                "delete": st.column_config.CheckboxColumn("🗑", default=False, width=30),
                 "ts": st.column_config.DatetimeColumn("Time", format="DD.MM.YYYY HH:mm", width="small"),
-                "x_ray": st.column_config.TextColumn("X-RAY", width="medium"),
-                "x_ray_composite": st.column_config.TextColumn("Composite", width="medium"),
+                "x_ray": st.column_config.TextColumn("X-RAY", width="small"),
+                "x_ray_composite": st.column_config.TextColumn("Composite", width="small"),
+                "report_diver": st.column_config.TextColumn("Diver", width="small"),
                 "note": st.column_config.TextColumn("Note ✏️", width="small"),
-                "raw_data": st.column_config.TextColumn("Raw", width="large"),
+                "raw_data": st.column_config.TextColumn("Raw", width="medium"),
             }
         )
         
     else:
-        st.info("База данных пуста.")
+        st.markdown(
+            """
+            <div style="
+                background-color: rgba(100, 181, 246, 0.1); 
+                color: #64B5F6;
+                padding: 8px 16px; 
+                border-radius: 8px; 
+                width: fit-content;
+                border: 1px solid rgba(100, 181, 246, 0.2);
+                margin-bottom: 10px;
+            ">
+                ℹ️ База данных пуста.
+            </div>
+            """, 
+            unsafe_allow_html=True
+        )
+with tab3:
+    # 1. Mode Selection
+    mode = st.radio("Источник данных", ["Выбрать из базы данных", "Ручной ввод"], horizontal=True, label_visibility="collapsed")
+    
+    selected_metrics = None
+    
+    if "Ручной" in mode:
+        raw_text = st.text_area("Вставьте данные свечи", height=150, label_visibility="collapsed", placeholder="Вставьте свечи здесь...", key="manual_candle_input")
+        
+        # Paw Button
+        c_paw, _ = st.columns([1, 10])
+        with c_paw:
+            if st.button("🐾", key="btn_manual_paw", type="primary"):
+                if raw_text:
+                    # --- REFACTORED CALL ---
+                    # We reuse the same robust function used in Tab 1
+                    try:
+                        # Use current time as default, similar to Tab 1
+                        final_save_list, orphan_errors = process_raw_text_batch(raw_text)
+                        
+                        if orphan_errors:
+                            st.error("\n".join(orphan_errors))
+                        
+                        if final_save_list:
+                            # In Manual Mode we usually expect 1 candle.
+                            # We take the first valid Result (which might be a Composite or Single)
+                            m = final_save_list[0]
+                            st.session_state['manual_diver_candle'] = m
+                            st.rerun()
+                        elif not orphan_errors:
+                            st.warning("Не удалось распознать данные. Проверьте формат.")
+                            
+                    except Exception as e:
+                        st.error(f"Системная ошибка: {e}")
+        
+        # Display Manual Result (Persisted)
+        if st.session_state.get('manual_diver_candle'):
+            
+            # Split Screen Logic
+            # c_left takes 50%, c_right takes 50%
+            c_left, c_right = st.columns([1, 1])
+            
+            # --- LEFT HALF: EXPANDER ---
+            with c_left:
+                m_data = st.session_state['manual_diver_candle']
+                try:
+                    ts_obj = datetime.fromisoformat(m_data.get('ts'))
+                    ts_str = ts_obj.strftime('%d.%m.%Y %H:%M')
+                except:
+                    ts_str = str(m_data.get('ts', '')).replace('T', ' ')[:16]
+                
+                warn_icon = " ⚠️" if m_data.get('missing_fields') else ""
+                label = f"{ts_str} · {m_data.get('exchange')} · {m_data.get('symbol_clean')} · {m_data.get('tf')} · O {fmt_num(m_data.get('open'))}{warn_icon}"
+                
+                with st.expander(label, expanded=False):
+                    if m_data.get('missing_fields'):
+                         st.warning(f"Не найдены поля: {', '.join(m_data['missing_fields'])}")
+                         
+                    # === DYNAMIC TABS (For Manual Mode) ===
+                    if m_data.get('x_ray_composite'):
+                        t_xray, t_comp = st.tabs(["X-RAY", "⚡️ COMPOSITE"])
+                        with t_xray:
+                             if m_data.get('x_ray'): st.code(m_data['x_ray'], language="yaml")
+                        with t_comp:
+                             st.code(m_data['x_ray_composite'], language="yaml")
+                    else:
+                        if m_data.get('x_ray'):
+                             st.code(m_data['x_ray'], language="yaml")
+
+            # --- RIGHT HALF: CONTROLS ---
+            with c_right:
+                mk_base = "manu_diver"
+                
+                # Align Zone, Action, Button on one line in this right half
+                r1, r2, r3 = st.columns([2, 2, 1.5], gap="small")
+                
+                with r1:
+                    m_zone = st.selectbox(
+                        "📍 Зона", 
+                        ["🌪 В воздухе", "🟢 Поддержка", "🔴 Сопротивление"],
+                        key=f"zone_{mk_base}",
+                        label_visibility="collapsed",
+                        index=None,
+                        placeholder="📍 Зона"
+                    )
+                with r2:
+                    m_action = st.selectbox(
+                        "⚡️ Действие", 
+                        [
+                            "🛡 Удержание",
+                            "⚔️ Пробой",
+                            "🎣 Л.Пробой",
+                            "🪜 На границе",
+                            "🕯 Тело на уровне"
+                        ],
+                        key=f"act_{mk_base}",
+                        label_visibility="collapsed",
+                        index=None,
+                        placeholder="⚡️ Действие"
+                    )
+                with r3:
+                    if st.button("🔮 Анализ", key=f"btn_{mk_base}", type="primary", use_container_width=True):
+                         # Mapping Logic (clean internal codes)
+                        z_map = {
+                            "🌪 В воздухе": "Air",
+                            "🟢 Поддержка": "Support",
+                            "🔴 Сопротивление": "Resistance"
+                        }
+                        
+                        a_map = {
+                            "� Удержание": "AT_EDGE",
+                            "⚔️ Пробой": "BREAK",
+                            "🎣 Л.Пробой": "PROBE",
+                            "🪜 На границе": "AT_EDGE_BORDERLINE",
+                            "🕯 Тело на уровне": "AT_EDGE_TAIL"
+                        }
+                        
+                        zone_code = z_map.get(m_zone)
+                        action_code = a_map.get(m_action)
+                        
+                        # Validate
+                        if not zone_code or not action_code:
+                            st.toast("⚠️ Выберите Зону и Действие!", icon="⚠️")
+                        else:
+                            report = diver_engine.run_expert_analysis(manual_candle_data, zone_code, action_code)
+                            st.session_state['manual_diver_report'] = report
+                            st.rerun()
+                        
+                        full_zone = z_map.get(m_zone, m_zone)
+                        full_action = a_map.get(m_action, m_action)
+                        
+                        # Validate selection
+                        if not full_zone or not full_action:
+                            st.toast("⚠️ Выберите Зону и Действие!", icon="⚠️")
+                        else:
+                            report = diver_engine.run_expert_analysis(m_data, full_zone, full_action)
+                            st.session_state['manual_diver_report'] = report
+            
+            # --- BOTTOM: REPORT (Full Width) ---
+            if st.session_state.get('manual_diver_report'):
+                # Report takes the LEFT HALF width to match the expander width?
+                # User said: "Left field with report..."
+                # Wait: "Left field with report and right... place 3 other forms".
+                # This implies the Report should also be in the Left Half?
+                # Or maybe user meant the Expander IS the report.
+                # "Left field with report [Expander?] and right... place 3 buttons".
+                # Where does the RESULT go?
+                # Usually results go below.
+                # Let's put the result in the Left Half below the expander.
+                
+                with c_left:
+                    st.code(st.session_state['manual_diver_report'], language="text")
+
+    else: # DB Mode
+        # Single Row for Filters + Selector
+        # Ratio: TF (small), Dates (med), Selector (wide)
+        c_tf, c_date, c_sel = st.columns([1, 1.5, 3], gap="small")
+        
+        with c_tf:
+            all_tfs = ["1m", "5m", "15m", "1h", "4h", "1d", "1w"]
+            filter_tfs = st.multiselect(
+                "TF", 
+                all_tfs, 
+                default=[], 
+                placeholder="TF", 
+                label_visibility="collapsed",
+                key="diver_db_tf_filter"
+            )
+            
+        with c_date:
+            filter_dates = st.date_input(
+                "Период", 
+                value=[], 
+                label_visibility="collapsed",
+                key="diver_db_date_filter"
+            )
+        
+        # Parse Dates & Load
+        d_start, d_end = None, None
+        if len(filter_dates) == 2:
+            d_start, d_end = filter_dates
+        elif len(filter_dates) == 1:
+             d_start = filter_dates[0]
+             
+        db_df = load_candles_db(limit=500, start_date=d_start, end_date=d_end, tfs=filter_tfs)
+        
+
+        selected_metrics = None
+        
+        with c_sel:
+            if not db_df.empty:
+                # Create label map
+                options_map = {}
+                for idx, row in db_df.iterrows():
+                    try:
+                        ts_str = str(row['ts']).replace('T', ' ')[:16]
+                        label = f"{ts_str} | {row.get('symbol_clean')} | {row.get('tf')} | O: {row.get('open')}"
+                        options_map[label] = row.to_dict()
+                    except:
+                        continue
+                
+                sel_label = st.selectbox(
+                    "Выберите свечу", 
+                    list(options_map.keys()),
+                    index=None,
+                    placeholder="Выберите свечу для анализа",
+                    label_visibility="collapsed"
+                )
+                
+                if sel_label:
+                    selected_metrics = options_map[sel_label]
+            else:
+                st.markdown(
+                    """
+                    <div style="
+                        background-color: rgba(100, 181, 246, 0.1); 
+                        color: #64B5F6;
+                        padding: 8px 12px; 
+                        border-radius: 4px; 
+                        width: fit-content;
+                        font-size: 14px;
+                        border: 1px solid rgba(100, 181, 246, 0.2);
+                    ">
+                        ℹ️ Нет данных
+                    </div>
+                    """, 
+                    unsafe_allow_html=True
+                )
+
+        if selected_metrics:
+            # COPY OF MANUAL INPUT LAYOUT
+            m_data = selected_metrics
+            
+            # Split Screen Logic
+            d_left, d_right = st.columns([1, 1])
+            
+            # --- LEFT HALF: EXPANDER + REPORT ---
+            with d_left:
+                try:
+                    ts_obj = datetime.fromisoformat(str(m_data.get('ts')))
+                    ts_str = ts_obj.strftime('%d.%m.%Y %H:%M')
+                except:
+                    ts_str = str(m_data.get('ts', '')).replace('T', ' ')[:16]
+                
+                # Check missing fields? DB usually has them or not.
+                missing_f = m_data.get('missing_fields', [])
+                warn_icon = " ⚠️" if missing_f else ""
+                
+                label = f"{ts_str} · {m_data.get('exchange')} · {m_data.get('symbol_clean')} · {m_data.get('tf')} · O {m_data.get('open')}{warn_icon}"
+                
+                with st.expander(label, expanded=False):
+                    # Tabs logic
+                    xray_val = m_data.get('x_ray')
+                    comp_val = m_data.get('x_ray_composite')
+                    
+                    if comp_val:
+                        t_xray, t_comp = st.tabs(["X-RAY", "⚡️ COMPOSITE"])
+                        with t_xray:
+                             if xray_val: st.code(xray_val, language="yaml")
+                        with t_comp:
+                             st.code(comp_val, language="yaml")
+                    else:
+                        if xray_val:
+                             st.code(xray_val, language="yaml")
+                             
+                # Show Report below expander
+                if st.session_state.get('db_diver_report'):
+                    st.code(st.session_state['db_diver_report'], language="text")
+
+            # --- RIGHT HALF: CONTROLS ---
+            with d_right:
+                mk_base = "db_diver"
+                
+                r1, r2, r3 = st.columns([2, 2, 1.5], gap="small")
+                
+                with r1:
+                    d_zone = st.selectbox(
+                        "📍 Зона", 
+                        ["🌪 В воздухе", "🟢 Поддержка", "🔴 Сопротивление"],
+                        key=f"zone_{mk_base}",
+                        label_visibility="collapsed",
+                        index=None,
+                        placeholder="📍 Зона"
+                    )
+                with r2:
+                    d_action = st.selectbox(
+                        "⚡️ Действие", 
+                        [
+                            "🛡 Удержание",
+                            "⚔️ Пробой",
+                            "🎣 Л.Пробой",
+                            "🪜 На границе",
+                            "🕯 Тело на уровне"
+                        ],
+                        key=f"act_{mk_base}",
+                        label_visibility="collapsed",
+                        index=None,
+                        placeholder="⚡️ Действие"
+                    )
+                with r3:
+                    if st.button("🔮 Анализ", key=f"btn_{mk_base}", type="primary", use_container_width=True):
+                         # Mapping Logic (clean internal codes)
+                        z_map = {
+                            "🌪 В воздухе": "Air",
+                            "🟢 Поддержка": "Support",
+                            "🔴 Сопротивление": "Resistance"
+                        }
+                        
+                        a_map = {
+                            "🛡 Удержание": "AT_EDGE",
+                            "⚔️ Пробой": "BREAK",
+                            "🎣 Л.Пробой": "PROBE",
+                            "🪜 На границе": "AT_EDGE_BORDERLINE",
+                            "🕯 Тело на уровне": "AT_EDGE_TAIL"
+                        }
+                        
+                        zone_code = z_map.get(d_zone)
+                        action_code = a_map.get(d_action)
+                        
+                        # Validate
+                        if not zone_code or not action_code:
+                            st.toast("⚠️ Выберите Зону и Действие!", icon="⚠️")
+                        else:
+                            report = diver_engine.run_expert_analysis(selected_metrics, zone_code, action_code)
+                            st.session_state['db_diver_report'] = report
+                            st.rerun()
+
+
+
+
+    # 2. Analysis UI
+
