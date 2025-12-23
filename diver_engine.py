@@ -67,12 +67,14 @@ def prepare_logic_flags(m, location_ui):
     # ===== ОСТАЛЬНАЯ ЛОГИКА (БЕЗ ИЗМЕНЕНИЙ) =====
     
     # SENS now comes strictly from tf_params (t_base in app.py)
-    SENS = m.get('tf_sens', 0.5)
+    # Strict validation: expect keys to exist (checked by validate_metrics)
+    SENS = m.get('tf_sens') 
+        
     A_tol = SENS * 0.33
     
-    oi_unload = m.get('oi_unload', False)
-    oi_counter = m.get('oi_counter', False)
-    oi_set = m.get('oi_set', False)
+    oi_unload = m.get('oi_unload')
+    oi_counter = m.get('oi_counter')
+    oi_set = m.get('oi_set')
     oi_in_sens = m.get('oi_in_sens', True)
     
     # CVD Noise check
@@ -85,11 +87,11 @@ def prepare_logic_flags(m, location_ui):
         
         "sens": SENS,
         "a_tol": A_tol,
-        "t_set": m.get('t_set_pct', 0),
-        "t_counter": m.get('t_counter_pct', 0),
-        "t_unload": m.get('t_unload_pct', 0),
+        "t_set": m.get('t_set_pct'),      # No default: must exist
+        "t_counter": m.get('t_counter_pct'), # No default
+        "t_unload": m.get('t_unload_pct'),   # No default
         
-        "oi_unload": oi_unload,
+        "oi_unload": oi_unload, # No default
         "oi_counter": oi_counter,
         "oi_set": oi_set,
         "oi_in_sens": oi_in_sens,
@@ -209,160 +211,205 @@ def calculate_aqs(m, flags):
 # --- 3. CLASSIFIER ---
 def classify_main(m, flags, aqs):
     """
-    Main Logic tree KB Section 4.7
+    Правильная классификация с учетом торговой логики.
+    ПАНИКА (разгрузка) > ПОГЛОЩЕНИЕ > остальное
+    
+    ПРАВКИ:
+    1. ✅ Вернули "ПРОПУСК" вместо "none"
+    2. ✅ Поправили логику Встречного набора (проверка направления)
+    3. ✅ Убрали хардкод 0.30, используем m['liq_squeeze'] и flags.get('liq_threshold')
+    4. ✅ Для AQS < 0.50 возвращаем prob_final = 0 (полный игнор)
+    5. ✅ Возвращаем 4 значения для совместимости (без prob_mod_composite)
+    
+    Возвращает: (cls, prob_final, summary, direction)
     """
     
+    # ========================================================================
     # 0. GATES (KB 4.6)
-    # Безопасное извлечение данных (None -> 0)
+    # ========================================================================
+    # Используем флаг из app.py, так как там уже учтен глобальный лимит
     liq = m.get('liq_share_pct', 0) or 0
+    # Пытаемся получить порог для красивого вывода, если его нет - дефолт 0.30
+    liq_threshold = flags.get('liq_threshold', 0.30)
+    
+    if m.get('liq_squeeze') or liq > liq_threshold:
+        return "NO_LABEL", 0, f"Сквиз ликвидаций (LiqShare {liq:.2f}% > {liq_threshold:.2f}%). Пропуск.", "ПРОПУСК"
+        
     rng = m.get('range', 0) or 0
-    rng_pct = m.get('range_pct', 0) or 0
-    
-    # Gate 1: Сквиз Ликвидаций
-    if m.get('liq_squeeze') or liq > 0.30:
-        return "NO_LABEL", 0, f"Сквиз ликвидаций (LiqShare = {liq:.2f}% > 30%). Первый тест — пропуск.", "none"
-    
-    # Gate 2: Отсутствие диапазона (Флэт/Доджи)
-    # Строго по БЗ: range == 0 или range_pct < 0.01
-    elif rng == 0 or rng_pct < 0.01:
-        return "NO_LABEL", 0, "Диапазон = 0. Нет ясной структуры свечи.", "none"
-    
-    # Gate 3: Мертвая свеча (Цена и CVD стоят)
+    if rng == 0:
+        return "NO_LABEL", 0, "Диапазон 0.", "ПРОПУСК"
+        
     price_sign = m.get('price_sign', 0)
     cvd_sign = m.get('cvd_sign', 0)
     
+    # Gate 3: Мертвая свеча
     if abs(price_sign) < 0.01 and abs(cvd_sign) < 0.01:
-        return "NO_LABEL", 0, "Цена и CVD не движутся. Мёртвая свеча.", "none"
+        return "NO_LABEL", 0, "Цена и CVD не движутся. Мёртвая свеча.", "ПРОПУСК"
     
-    # 1. Divergence Check
+    # ========================================================================
+    # 1. Divergence Check (KB 4.1)
+    # ========================================================================
     dpx = m.get('dpx', 0)
     pvd = m.get('price_vs_delta', 'neutral')
     
-    # KB 4.1 Divergence Flag Parsing
     valid_diver = ["mismatch", "div"]
     valid_match = ["match"]
     
-    # Basic Divergence flag
+    # Basic Divergence flag (Restored for debug/legacy compatibility)
     flag_diver = (dpx == -1) or (pvd in valid_diver)
     
     conflict_comment = ""
     prob_mod = 0
+    prob_mod_composite = 0
     
     if dpx == 1 and pvd in valid_match:
-         # No Diver
-         return "NO_LABEL", 0, "Нет дивергенции цены и агрессии.", "none"
-    elif dpx == -1 and pvd in valid_diver:
-         # Clean Diver
-         pass
+        return "NO_LABEL", 0, "Нет дивергенции.", "ПРОПУСК"
     elif (dpx == 1 and pvd in valid_diver) or (dpx == -1 and pvd in valid_match):
-         # Conflict
-         prob_mod = -15
-         conflict_comment = " (Конфликт сигналов: dpx и price_vs_delta противоречат, dpx приоритет)"
-    else:
-         prob_mod = -10
-         conflict_comment = " (Конфликт: неясное состояние флагов)"
-         
-    # Check CVD Noise
-    if flags['is_cvd_noise']:
-        # Recalculate threshold for display (as used in prepare_logic_flags)
-        sens = flags['sens']
-        cvd_min = (2.0 * sens / 0.90) if sens > 0 else 0
-        cvd_pct = m.get('cvd_pct', 0)
-        return "NO_LABEL", 0, f"|CVD%| = {cvd_pct:.2f}% < CVD_MIN = {cvd_min:.2f}% → шум, не анализируем", "none"
+        prob_mod = -15
+        conflict_comment = " (Конфликт сигналов)"
         
-    # 2. Main Classification Logic (KB 4.7)
+    # CVD Noise Check
+    if flags['is_cvd_noise']:
+        return "NO_LABEL", 0, "CVD шум", "ПРОПУСК"
     
+    # ========================================================================
+    # 2. Main Classification (KB 4.7 + ТОРГОВАЯ ЛОГИКА)
+    # ========================================================================
     cls = "НЕВОЗМОЖНО_КЛАССИФИЦИРОВАТЬ"
     prob_base = 0
     summary = ""
-    direction = "none"
+    direction = "ПРОПУСК"
     
     doi = m.get('doi_pct', 0) or 0
     
-    # --- SCENARIO 1: AT EDGE ---
+    # ========================================================================
+    # --- SCENARIO 1: AT_EDGE (ЦЕНА У УРОВНЯ) ---
+    # ========================================================================
     if flags['at_edge']:
         
-        if flags['oi_unload']:
-             cls = "РАЗГРУЗКА_ПОЗИЦИЙ"
-             prob_base = 85
-             direction = "EXIT"
-             summary = "Разгрузка позиций на уровне. Деньги уходят."
-             
-        elif abs(doi) <= flags['a_tol']:
-             if aqs >= 0.70:
-                 cls = "СЕРТИФИЦИРОВАННОЕ_ПОГЛОЩЕНИЕ"
-                 prob_base = aqs * 100
-                 direction = "ЛОНГ" if price_sign == 1 else "ШОРТ"
-                 summary = "Активный лимитный игрок держит уровень (Absorption)."
-             elif aqs >= 0.50:
-                 cls = "РАСХОЖДЕНИЕ_БЕЗ_КЛАССА"
-                 prob_base = aqs * 100
-                 summary = "Есть расхождение, но AQS недостаточно высок для подтверждения."
-             else:
-                 cls = "НЕВОЗМОЖНО_КЛАССИФИЦИРОВАТЬ"
-                 summary = "AQS < 0.50, шум."
-                 
-        elif abs(doi) <= flags['sens']: # Between A_tol and SENS
-             cls = "ДИВЕР_НА_КРОМКЕ"
-             prob_base = min(aqs * 100, 60)
-             direction = "ОСТОРОЖНО"
-             summary = "ОИ на границе пороговой зоны."
-             
-        elif (doi > flags['sens']) and (doi <= flags['t_counter']):
-             # KB says: SENS < doi <= T_vstrechniy.
-             cls = "ВСТРЕЧНЫЙ_НАБОР"
-             prob_base = min(aqs * 80, 85)
-             direction = "ЛОНГ" if price_sign == 1 else "ШОРТ"
-             summary = "Встречная позиция формируется, ОИ растет умеренно."
-             
-        else: # > T_counter
-             cls = "ВСТРЕЧНЫЙ_НАБОР"
-             prob_base = aqs * 70
-             direction = "РИСК"
-             summary = "Сильный рост ОИ. Возможен пробой или климакс."
-
-    # --- SCENARIO 2: AIR ---
-    else:
-        if doi <= -flags['sens']: # KB: doi <= -SENS
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # TIER 1: РАЗГРУЗКА (ПАНИКА) ← ГЛАВНЫЙ ДОМИНИРУЮЩИЙ СИГНАЛ!
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        if doi <= flags['t_unload']:
             cls = "РАЗГРУЗКА_ПОЗИЦИЙ"
-            # Recalculate prob base relative to magnitude? Or just static high?
-            # KB says Unload is strong signal.
-            # Use strict math for prob?
-            # Existing code used t_unload. Let's use SENS as base for scale or just static.
-            # "min(abs(doi / SENS) * 100, 90)" makes sense?
-            # User code had prob_base = 85 for unload? 
-            # In previous snippet it was dynamic.
-            # Let's use dynamic scaling against SENS or hard 85?
-            # "min(abs(doi / flags['sens']) * 50, 90)" maybe too low if doi=sens.
-            # Let's keep it safe:
-            ratio = abs(doi) / flags['sens'] if flags['sens'] > 0 else 1
-            prob_base = min(ratio * 60, 90) # if doi = -2*sens -> 120 -> 90. if doi = -sens -> 60.
+            ratio = abs(doi) / abs(flags['t_unload']) if flags['t_unload'] != 0 else 1
+            prob_base = min(ratio * 80, 95)
+            direction = "EXIT (ликвидация на уровне)"
+            summary = f"⚠️ КРИТИЧЕСКИЙ: ОИ упал ({doi:.2f}%). Массовое закрытие (Unload), риск разворота!"
+        
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # TIER 2: ПОГЛОЩЕНИЕ (контролируемое)
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        elif abs(doi) <= flags['a_tol']:
+            if aqs >= 0.70:
+                cls = "СЕРТИФИЦИРОВАННОЕ_ПОГЛОЩЕНИЕ"
+                prob_base = aqs * 100
+                direction = "ЛОНГ" if price_sign == 1 else "ШОРТ"
+                summary = "Активный лимитный игрок держит уровень."
+            elif aqs >= 0.50:
+                cls = "РАСХОЖДЕНИЕ_БЕЗ_КЛАССА"
+                prob_base = aqs * 100
+                direction = "МОНИТОР"
+                summary = "Есть расхождение, но AQS < 0.70"
+            else:
+                # Если AQS < 0.50, полный игнор (prob_final = 0)
+                cls = "NO_LABEL"
+                prob_base = 0
+                direction = "ПРОПУСК"
+                summary = "AQS < 0.50, шум"
+        
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # TIER 3: ДИВЕР НА КРОМКЕ
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        elif abs(doi) <= flags['sens']:
+            cls = "ДИВЕР_НА_КРОМКЕ"
+            prob_base = min(aqs * 100, 60)
+            direction = "ОСТОРОЖНО"
+            summary = "ОИ на границе пороговой зоны."
+        
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # TIER 4: ВСТРЕЧНЫЙ НАБОР (ранний)
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        elif abs(doi) <= flags['t_counter']:
+            cls = "ВСТРЕЧНЫЙ_НАБОР"
+            prob_base = min(aqs * 80, 85)
+            direction = "ЛОНГ (ранний)" if price_sign == 1 else "ШОРТ (ранний)"
+            summary = "Встречная позиция формируется."
+        
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # TIER 5: ОЧЕНЬ ВЫСОКИЙ ОИ
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        else:
+            # Проверяем: ОИ растет в сторону цены (тренд) или против (встречный)?
             
+            if (price_sign == 1 and doi > 0) or (price_sign == -1 and doi < 0):
+                # ОИ растет ПО ТРЕНДУ (тренд подтверждается)
+                cls = "ПОДТВЕРЖДЕНИЕ_ТРЕНДА"
+                prob_base = min(aqs * 85, 90)
+                direction = "ЛОНГ (сильный)" if price_sign == 1 else "ШОРТ (сильный)"
+                summary = "Сильный импульс: ОИ растет по тренду. Подтверждение направления."
+            else:
+                # ОИ растет ПРОТИВ ТРЕНДА (встречный набор или дивер)
+                cls = "ВСТРЕЧНЫЙ_НАБОР"
+                prob_base = aqs * 70
+                direction = "РИСК"
+                summary = "Сильный ОИ против тренда. Встречный набор или контртренд."
+    
+    # ========================================================================
+    # --- SCENARIO 2: AIR (ЦЕНА В ВОЗДУХЕ) ---
+    # ========================================================================
+    else:  # at_edge == False
+        
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # TIER 1: РАЗГРУЗКА (в воздухе, БЕЗ уровня)
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        if doi <= flags['t_unload']:
+            cls = "РАЗГРУЗКА_ПОЗИЦИЙ"
+            ratio = abs(doi) / abs(flags['t_unload']) if flags['t_unload'] != 0 else 1
+            prob_base = min(ratio * 60, 90)
             direction = "EXIT"
-            summary = "Активное закрытие позиций против цены."
-            
-        elif abs(doi) < flags['sens']:
+            summary = "Активное закрытие позиций в воздухе."
+        
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # TIER 2: РАСХОЖДЕНИЕ
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        elif abs(doi) <= flags['sens']:
             cls = "РАСХОЖДЕНИЕ_БЕЗ_КЛАССА"
             prob_base = aqs * 100
             direction = "МОНИТОР"
-            summary = "Дивергенция без поддержки ОИ."
-            
-        elif (doi > flags['sens']) and (doi <= flags['t_counter']):
-            cls = "ВСТРЕЧНЫЙ_НАБОР" # Early
+            summary = "ОИ слабо движется. Ждём развития."
+        
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # TIER 3: ВСТРЕЧНЫЙ НАБОР (ранний, в воздухе)
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        elif abs(doi) <= flags['t_counter']:
+            cls = "ВСТРЕЧНЫЙ_НАБОР"
             prob_base = min(aqs * 75, 75)
             direction = "ЛОНГ (ранний)" if price_sign == 1 else "ШОРТ (ранний)"
-            summary = "Набор позиций в воздухе. Ранний сигнал."
-            
+            summary = "Набор позиций в воздухе (ранний)."
+        
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # TIER 4: ОЧЕНЬ ВЫСОКИЙ ОИ В ВОЗДУХЕ
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         else:
-            cls = "ВСТРЕЧНЫЙ_НАБОР"
-            prob_base = min(aqs * 65, 75)
-            direction = "РИСК"
-            summary = "Сильный встречный ОИ в воздухе."
-            
-    # Final Probability mods
+            if (price_sign == 1 and doi > 0) or (price_sign == -1 and doi < 0):
+                # ОИ растет ПО ТРЕНДУ (в воздухе тренд подтверждается)
+                cls = "ПОДТВЕРЖДЕНИЕ_ТРЕНДА"
+                prob_base = min(aqs * 80, 85)
+                direction = "ЛОНГ (сильный)" if price_sign == 1 else "ШОРТ (сильный)"
+                summary = "Сильный импульс в воздухе: ОИ растет по тренду."
+            else:
+                # ОИ растет ПРОТИВ ТРЕНДА (встречный набор)
+                cls = "ВСТРЕЧНЫЙ_НАБОР"
+                prob_base = min(aqs * 65, 75)
+                direction = "РИСК"
+                summary = "Встречный ОИ в воздухе (высокий)."
+    
+    # ========================================================================
+    # 3. ФИНАЛЬНАЯ КОРРЕКЦИЯ ВЕРОЯТНОСТИ
+    # ========================================================================
     prob_final = prob_base + prob_mod
     
-    # Append conflict info if any
     if conflict_comment:
         summary += conflict_comment
     
@@ -371,10 +418,19 @@ def classify_main(m, flags, aqs):
     if abs(tilt) >= 10:
         if (price_sign == 1 and tilt < 0) or (price_sign == -1 and tilt > 0):
             prob_final -= 10
-            summary += " (Conflict Tilt)"
-
-    if cls == "NO_LABEL": prob_final = 0
-    prob_final = max(min(prob_final, 99), 15) if cls != "NO_LABEL" else 0
+            summary += " (Конфликт Tilt)"
+    
+    # prob_mod_composite добавлен внутрь расчета, но не возвращается наружу
+    prob_final += prob_mod_composite
+    
+    # Для NO_LABEL или AQS < 0.50 → prob_final = 0 (полный игнор)
+    if cls == "NO_LABEL":
+        prob_final = 0
+    elif cls == "НЕВОЗМОЖНО_КЛАССИФИЦИРОВАТЬ":
+        prob_final = 0  
+    else:
+        # Нормализация вероятности (только для валидных классов)
+        prob_final = max(min(prob_final, 99), 20)  # Min 20% для валидного сигнала
     
     return cls, round(prob_final), summary, direction
 
@@ -395,15 +451,22 @@ def generate_diver_report(m, location_ui):
     elif prob >= 50: q_desc = "Средняя"
     else: q_desc = "Низкая"
     
+    # Format Location String
+    loc_str = flags['edge_type']
+    if flags['at_edge']:
+         # Use edge_status (internal code) or map back to UI?
+         # Internal code (BREAK, PROBE) is fine and clear.
+         loc_str += f" ({flags['edge_status']})"
+    
     report = f"""КЛАССИФИКАЦИЯ СВЕЧИ
 
-Дата: {ts_str} | ТФ: {m.get('tf')} | {m.get('symbol_clean')} | Локация: {flags['edge_type']} ({location_ui.get('action')})
+Дата: {ts_str} | ТФ: {m.get('tf')} | {m.get('symbol_clean')} | Локация: {loc_str}
 
-КЛАСС: **{cls}**
-НАПРАВЛЕНИЕ: **{direction}**
+КЛАСС: {cls}
+НАПРАВЛЕНИЕ: {direction}
 
 ВЕРОЯТНОСТИ И ОЦЕНКИ:
-• Надёжность сигнала: **{prob}%** ({q_desc})
+• Надёжность сигнала: {prob}% ({q_desc})
 • AQS Балл: {aqs:.2f}
 
 ЧТО ПРОИЗОШЛО:
@@ -437,7 +500,9 @@ def validate_metrics(data):
         "cvd_sign", "dtrades_pct", "ratio_stable", "doi_pct",
         "liq_share_pct", "liq_squeeze", "oe", "oipos", "oi_path",
         "dpx", "price_vs_delta", "avg_trade_buy", "avg_trade_sell",
-        "tilt_pct", "range_pct", "implied_price"
+        "tilt_pct", "range_pct", "implied_price",
+        # Strict Validation Keys Added:
+        "tf_sens", "t_set_pct", "t_counter_pct", "t_unload_pct"
     ]
     
     missing = []

@@ -98,6 +98,40 @@ st.markdown("""
         header[data-testid="stHeader"] {
             background: transparent !important;
         }
+
+        /* --- NAVIGATION TABS (Radio) --- */
+        [data-testid="stRadio"] > div {
+            flex-direction: row;
+            gap: 20px; /* Space between textual tabs */
+            background: transparent !important;
+            padding: 0px;
+            display: inline-flex;
+            border-bottom: 0px solid rgba(255,255,255,0.1);
+        }
+        [data-testid="stRadio"] label {
+            background: transparent !important;
+            padding: 5px 0px; /* Minimal padding */
+            color: #90A4AE; /* Muted text */
+            font-weight: 500;
+            transition: all 0.2s;
+            margin-right: 0 !important;
+            border: none;
+            cursor: pointer;
+            border-radius: 0px;
+            border-bottom: 2px solid transparent; /* Prepare for underline */
+        }
+        /* Selected State */
+        [data-testid="stRadio"] label[data-checked="true"] {
+             color: #FFFFFF !important;
+             font-weight: 600;
+             border-bottom: 2px solid #FFFFFF !important; /* Simple underline */
+             box-shadow: none !important;
+        }
+        /* Hover State */
+        [data-testid="stRadio"] label:hover {
+             color: #FFFFFF;
+        }
+        
     </style>
 """, unsafe_allow_html=True)
 
@@ -383,8 +417,10 @@ def calculate_metrics(raw_data, config):
     s_trades = m.get('sell_trades')
     
     if b_trades is not None and s_trades is not None:
+        # Recalculate precision delta instead of parsed partial
+        m['trades_delta'] = b_trades - s_trades 
         total_trades = b_trades + s_trades
-        m['dtrades_pct'] = (m.get('trades_delta', 0) / total_trades * 100) if total_trades else 0
+        m['dtrades_pct'] = (m['trades_delta'] / total_trades * 100) if total_trades else 0
     else:
         total_trades = None
         m['dtrades_pct'] = None
@@ -517,7 +553,7 @@ def calculate_metrics(raw_data, config):
     
     # K Params: Case-insensitive lookup for tf_params
     k_set, k_ctr, k_unl = 1.0, 1.0, 1.0
-    tf_sens_base = 0.5 # Default if not found in tf_params
+    tf_sens_base = None # Default is None (Strict Validation)
     
     # Try exact match first
     tf_data = tf_params.get(tf_key)
@@ -540,19 +576,30 @@ def calculate_metrics(raw_data, config):
     # Calculate T-thresholds using TF-specific Sens * K-factor
     # (Removed asset coeff per user request)
     
-    t_base = tf_sens_base 
-    
-    m['t_set_pct'] = round(t_base * k_set, 2)
-    m['oi_set'] = m['doi_pct'] >= m['t_set_pct']
-    
-    m['t_counter_pct'] = round(t_base * k_ctr, 2)
-    m['oi_counter'] = (m['dpx'] == -1) and (m['doi_pct'] >= m['t_counter_pct'])
-    
-    m['t_unload_pct'] = round(-(t_base * k_unl), 2)
-    m['oi_unload'] = m['doi_pct'] <= m['t_unload_pct']
-    
-    # Pass TF Sens to Diver Engine (as strictly requested)
-    m['tf_sens'] = tf_sens_base
+    # Strict validation: Only calculate if we found a base sensitivity
+    if tf_sens_base is not None:
+        t_base = tf_sens_base 
+        
+        m['t_set_pct'] = round(t_base * k_set, 2)
+        m['oi_set'] = m['doi_pct'] >= m['t_set_pct']
+        
+        m['t_counter_pct'] = round(t_base * k_ctr, 2)
+        m['oi_counter'] = (m['dpx'] == -1) and (m['doi_pct'] >= m['t_counter_pct'])
+        
+        m['t_unload_pct'] = round(-(t_base * k_unl), 2)
+        m['oi_unload'] = m['doi_pct'] <= m['t_unload_pct']
+        
+        # Pass TF Sens to Diver Engine (as strictly requested)
+        m['tf_sens'] = tf_sens_base
+    else:
+        # Propagate None to trigger validation error downstream
+        m['t_set_pct'] = None
+        m['oi_set'] = None
+        m['t_counter_pct'] = None
+        m['oi_counter'] = None
+        m['t_unload_pct'] = None
+        m['oi_unload'] = None
+        m['tf_sens'] = None
     
     m['r_strength'] = abs(m['doi_pct']) / m['porog_final'] if m['porog_final'] else 0
     m['r'] = m['r_strength']
@@ -1197,9 +1244,41 @@ if os.path.exists(logo_path):
     )
 else:
     st.title("🖤 VANTA")
-tab1, tab2, tab3 = st.tabs(["Отчеты", "Свечи", "Дивер"])
 
-with tab1:
+# --- NAVIGATION LOGIC ---
+TABS = ["Отчеты", "Свечи", "Дивер"]
+
+# 1. Get current tab from URL or Session State
+query_params = st.query_params
+default_tab = TABS[0]
+
+# Check if 'tab' is in query params
+if "tab" in query_params:
+    qp_tab = query_params["tab"]
+    if qp_tab in TABS:
+        default_tab = qp_tab
+
+# 2. Render Navigation (Radio as Tabs)
+# Use a callback to update URL immediately on change
+def on_tab_change():
+    st.query_params["tab"] = st.session_state.nav_radio
+
+selected_tab = st.radio(
+    "Navigation", 
+    TABS, 
+    index=TABS.index(default_tab), 
+    key="nav_radio", 
+    label_visibility="collapsed",
+    horizontal=True,
+    on_change=on_tab_change
+)
+
+
+
+# tab1, tab2, tab3 = st.tabs(["Отчеты", "Свечи", "Дивер"]) - REMOVED
+
+if selected_tab == "Отчеты":
+    # TAB 1 CONTENT
     input_text = st.text_area("Вставьте данные свечи", height=150, label_visibility="collapsed", placeholder="Вставьте свечи здесь...")
     
     # Скрываем выбор даты/времени, берем текущие
@@ -1268,7 +1347,7 @@ with tab1:
                         if full_data.get('x_ray'):
                              st.code(full_data['x_ray'], language="yaml")
 
-with tab2:
+if selected_tab == "Свечи":
     
     # 0. Filters Toolbar
     f1, f2, f3 = st.columns([2, 2, 1])
@@ -1397,7 +1476,7 @@ with tab2:
             """, 
             unsafe_allow_html=True
         )
-with tab3:
+if selected_tab == "Дивер":
     # 1. Mode Selection
     mode = st.radio("Источник данных", ["Выбрать из базы данных", "Ручной ввод"], horizontal=True, label_visibility="collapsed")
     
@@ -1482,6 +1561,9 @@ with tab3:
                         index=None,
                         placeholder="📍 Зона"
                     )
+                # Check disable condition
+                is_air_m = (m_zone == "🌪 В воздухе")
+                
                 with r2:
                     m_action = st.selectbox(
                         "⚡️ Действие", 
@@ -1495,7 +1577,8 @@ with tab3:
                         key=f"act_{mk_base}",
                         label_visibility="collapsed",
                         index=None,
-                        placeholder="⚡️ Действие"
+                        placeholder="⚡️ Действие" if not is_air_m else "⛔️ Недоступно в воздухе",
+                        disabled=is_air_m
                     )
                 with r3:
                     if st.button("🔮 Анализ", key=f"btn_{mk_base}", type="primary", use_container_width=True):
@@ -1507,7 +1590,7 @@ with tab3:
                         }
                         
                         a_map = {
-                            "� Удержание": "AT_EDGE",
+                            "🛡 Удержание": "AT_EDGE",
                             "⚔️ Пробой": "BREAK",
                             "🎣 Л.Пробой": "PROBE",
                             "🪜 На границе": "AT_EDGE_BORDERLINE",
@@ -1517,23 +1600,14 @@ with tab3:
                         zone_code = z_map.get(m_zone)
                         action_code = a_map.get(m_action)
                         
-                        # Validate
-                        if not zone_code or not action_code:
+                        # Validate (Action is optional if Zone is Air)
+                        if not zone_code or (not action_code and zone_code != "Air"):
                             st.toast("⚠️ Выберите Зону и Действие!", icon="⚠️")
                         else:
-                            report = diver_engine.run_expert_analysis(manual_candle_data, zone_code, action_code)
+                            # If Air, action_code might be None, logic handles it
+                            report = diver_engine.run_expert_analysis(m_data, zone_code, action_code)
                             st.session_state['manual_diver_report'] = report
                             st.rerun()
-                        
-                        full_zone = z_map.get(m_zone, m_zone)
-                        full_action = a_map.get(m_action, m_action)
-                        
-                        # Validate selection
-                        if not full_zone or not full_action:
-                            st.toast("⚠️ Выберите Зону и Действие!", icon="⚠️")
-                        else:
-                            report = diver_engine.run_expert_analysis(m_data, full_zone, full_action)
-                            st.session_state['manual_diver_report'] = report
             
             # --- BOTTOM: REPORT (Full Width) ---
             if st.session_state.get('manual_diver_report'):
@@ -1607,7 +1681,13 @@ with tab3:
                 )
                 
                 if sel_label:
-                    selected_metrics = options_map[sel_label]
+                    # 1. Get raw DB data
+                    raw_db_metrics = options_map[sel_label]
+                    
+                    # 2. Restore missing 'tf_sens' from Config (since DB column might be missing)
+                    # Use lighter update if possible, but calculate_metrics is safest
+                    config = load_configurations() 
+                    selected_metrics = calculate_metrics(raw_db_metrics, config)
             else:
                 st.markdown(
                     """
@@ -1681,6 +1761,9 @@ with tab3:
                         index=None,
                         placeholder="📍 Зона"
                     )
+                # Check disable condition
+                is_air_d = (d_zone == "🌪 В воздухе")
+                
                 with r2:
                     d_action = st.selectbox(
                         "⚡️ Действие", 
@@ -1694,7 +1777,8 @@ with tab3:
                         key=f"act_{mk_base}",
                         label_visibility="collapsed",
                         index=None,
-                        placeholder="⚡️ Действие"
+                        placeholder="⚡️ Действие" if not is_air_d else "⛔️ Недоступно в воздухе",
+                        disabled=is_air_d
                     )
                 with r3:
                     if st.button("🔮 Анализ", key=f"btn_{mk_base}", type="primary", use_container_width=True):
@@ -1716,8 +1800,8 @@ with tab3:
                         zone_code = z_map.get(d_zone)
                         action_code = a_map.get(d_action)
                         
-                        # Validate
-                        if not zone_code or not action_code:
+                        # Validate (Action is optional if Zone is Air)
+                        if not zone_code or (not action_code and zone_code != "Air"):
                             st.toast("⚠️ Выберите Зону и Действие!", icon="⚠️")
                         else:
                             report = diver_engine.run_expert_analysis(selected_metrics, zone_code, action_code)
