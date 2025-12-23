@@ -496,6 +496,7 @@ def calculate_metrics(raw_data, config):
         m['limb_pct'] = None
         
     m['liq_squeeze'] = (m['liq_share_pct'] >= config['global_squeeze_limit']) if m.get('liq_share_pct') is not None else False
+    m['liq_threshold'] = config.get('global_squeeze_limit', 0.30)
 
 
 
