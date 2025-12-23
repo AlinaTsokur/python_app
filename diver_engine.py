@@ -7,6 +7,16 @@ def sign(x):
     elif x < 0: return -1
     else: return 0
 
+def extract_numeric_value(text, label):
+    """
+    Извлекает числовое значение из текста (с %)
+    Example: extract_numeric_value("CVD композит: 5.35%", "Композит") -> 5.35
+    """
+    if not text: return None
+    pattern = rf"{re.escape(label)}.*?([+-]?\d+\.?\d*)%"
+    match = re.search(pattern, text, re.IGNORECASE)
+    return float(match.group(1)) if match else None
+
 
 
 # --- 1. PREPARE LOGIC FLAGS ---
@@ -406,6 +416,67 @@ def classify_main(m, flags, aqs):
                 direction = "РИСК"
                 summary = "Встречный ОИ в воздухе (высокий)."
     
+    # --- 2.5 COMPOSITE LOGIC (HYBRID APPROACH) ---
+    prob_mod_composite = 0
+    composite_comment = ""
+    
+    comp_text = m.get('x_ray_composite') or m.get('composite_summary')
+    if comp_text:
+        comp_cvd = extract_numeric_value(comp_text, "Композит")
+        
+        if comp_cvd is not None:
+            cvd_pct = m.get('cvd_pct', 0)
+            
+            divergence_value = cvd_pct - comp_cvd
+            divergence_magnitude = (
+                abs(divergence_value) / max(abs(cvd_pct), abs(comp_cvd))
+                if max(abs(cvd_pct), abs(comp_cvd)) > 0
+                else 0
+            )
+            
+            signs_match = (sign(cvd_pct) == sign(comp_cvd))
+            is_significant_main = abs(cvd_pct) > 1.5
+            is_significant_comp = abs(comp_cvd) > 1.5
+            
+            # === HYBRID CASE A ===
+            if not signs_match and is_significant_main and is_significant_comp:
+                
+                if divergence_magnitude > 0.50:
+                    # ЭКСТРЕМАЛЬНЫЙ конфликт → УБИЙСТВО
+                    prob_mod_composite = -100
+                    cls = "NO_LABEL"
+                    return cls, 0, f"{summary} 🚨 ЭКСТРЕМАЛЬНЫЙ КОНФЛИКТ КОМПОЗИТА - АНАЛИЗ ОТМЕНЯЕТСЯ", "ПРОПУСК"
+                else:
+                    # Обычный конфликт → ШТРАФ
+                    prob_mod_composite = -50
+                    composite_comment = (
+                        f"⚠️ КОНФЛИКТ КОМПОЗИТА: знаки противоположны "
+                        f"(Binance {cvd_pct:+.2f}% vs Композит {comp_cvd:+.2f}%, разница {divergence_magnitude:.0%}). −50%"
+                    )
+            
+            # === CASE B ===
+            elif signs_match:
+                if divergence_magnitude < 0.05:
+                    prob_mod_composite = 0
+                    composite_comment = "✅ Композит согласован: расхождение < 5%."
+                else:
+                    bonus = divergence_magnitude * 20
+                    bonus = min(bonus, 25)
+                    prob_mod_composite = bonus
+                    composite_comment = (
+                        f"✅ Композит подтверждает: все биржи согласованы. +{bonus:.0f}%"
+                    )
+            
+            # === CASE C ===
+            else:
+                penalty = divergence_magnitude * 15
+                penalty = min(penalty, 30)
+                prob_mod_composite = -penalty
+                composite_comment = (
+                    f"⚠️ Слабое расхождение между биржами: -{penalty:.0f}%"
+                )
+                
+    # --- 3. FINAL PROBABILITY CORRECTION ---
     # ========================================================================
     # 3. ФИНАЛЬНАЯ КОРРЕКЦИЯ ВЕРОЯТНОСТИ
     # ========================================================================
@@ -435,12 +506,15 @@ def classify_main(m, flags, aqs):
         else:
             pen = 0
             
-        if pen > 0:
-            prob_final -= pen
-            summary += f" ({sev} Tilt-CVD)"
+            if pen > 0:
+                prob_final -= pen
+                summary += f" ({sev} Tilt-CVD)"
     
-    # prob_mod_composite добавлен внутрь расчета, но не возвращается наружу
+    # --- 3.1 ADD COMPOSITE MODIFIERS ---
+    
     prob_final += prob_mod_composite
+    if composite_comment:
+        summary += f" {composite_comment}"
     
     # --- STRICT FINAL GATES (AI Audit #7) ---
     # Для NO_LABEL, НЕВОЗМОЖНО_КЛАССИФИЦИРОВАТЬ или AQS < 0.50 → prob_final = 0 (полный игнор)
@@ -693,7 +767,7 @@ def generate_diver_report(m, location_ui):
 
 
 ФАКТОРЫ АНАЛИЗА:
-• CVD: {m.get('cvd_pct', 0):.2f}% → {cvd_desc}
+• CVD: {m.get('cvd_pct', 0):.2f}% → {cvd_desc} {summary.split('(')[-1].strip(')') if 'Композит' in summary else ''}
 • ΔOI: {m.get('doi_pct', 0):.2f}% → {doi_desc}
 • Геометрия: CLV {m.get('clv_pct'):.0f}%, Хвост L:{m.get('lower_tail_pct'):.0f}% / U:{m.get('upper_tail_pct'):.0f}%
 • Локация: {'У уровня' if flags['at_edge'] else 'В воздухе'}
@@ -726,7 +800,7 @@ def validate_metrics(data):
         # Strict Validation Keys Added:
         "tf_sens", "t_set_pct", "t_counter_pct", "t_unload_pct",
         # FIX: Added per AI Audit #3
-        "dominant_reject", "liq_threshold"
+        "liq_threshold"
     ]
     
     missing = []

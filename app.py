@@ -1745,7 +1745,21 @@ if selected_tab == "Дивер":
                              
                 # Show Report below expander
                 if st.session_state.get('db_diver_report'):
-                    st.code(st.session_state['db_diver_report'], language="text")
+                    report_txt = st.session_state['db_diver_report']
+                    st.code(report_txt, language="text")
+                    
+                    if st.button("💾 Сохранить отчет в БД", key="save_diver_db_btn"):
+                        c_id = m_data.get('id')
+                        if c_id:
+                            try:
+                                supabase.table('candles').update({
+                                    'report_diver': report_txt
+                                }).eq('id', c_id).execute()
+                                st.toast("Отчет сохранен в БД! ✅", icon="✅")
+                            except Exception as e:
+                                st.error(f"Ошибка сохранения: {e}")
+                        else:
+                            st.warning("Не найден ID свечи для сохранения.")
 
             # --- RIGHT HALF: CONTROLS ---
             with d_right:
