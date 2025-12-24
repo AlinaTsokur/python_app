@@ -1589,6 +1589,7 @@ if selected_tab == "Дивер":
                             "🟢 Поддержка": "Support",
                             "🔴 Сопротивление": "Resistance"
                         }
+
                         
                         a_map = {
                             "🛡 Удержание": "AT_EDGE",
@@ -1765,7 +1766,8 @@ if selected_tab == "Дивер":
             with d_right:
                 mk_base = "db_diver"
                 
-                r1, r2, r3 = st.columns([2, 2, 1.5], gap="small")
+                # New Layout: [Zone (1.2), Action (1.2), Analyze (0.7), ITB (0.7)]
+                r1, r2, r3, r4 = st.columns([1.2, 1.2, 0.7, 0.7], gap="small")
                 
                 with r1:
                     d_zone = st.selectbox(
@@ -1822,6 +1824,55 @@ if selected_tab == "Дивер":
                             report = diver_engine.run_expert_analysis(selected_metrics, zone_code, action_code)
                             st.session_state['db_diver_report'] = report
                             st.rerun()
+
+                with r4:
+                    if st.button("🛠 ИТБ", type="secondary", key="btn_toggle_itb", use_container_width=True):
+                        st.session_state['show_itb_form'] = not st.session_state.get('show_itb_form', False)
+
+                # --- ITB FORM RENDER ---
+                if st.session_state.get('show_itb_form'):
+                     itb_ph = f"Вставьте данные нарезки ({str(m_data.get('ts'))})..."
+                     itb_text = st.text_area("Данные нарезки", height=200, key="itb_input_area", label_visibility="collapsed", placeholder=itb_ph)
+                     
+                     if st.button("🚀 Запустить ITB Анализ", type="primary", key="btn_run_itb_real"):
+                            if not itb_text.strip():
+                                st.error("Пустой ввод!")
+                            else:
+                                slices = []
+                                config = load_configurations()
+                                lines = itb_text.strip().split('\n')
+                                is_valid = True
+                                
+                                for i, line in enumerate(lines):
+                                    if not line.strip(): continue
+                                    try:
+                                        raw_s = parse_raw_input(line)
+                                        met_s = calculate_metrics(raw_s, config)
+                                        slices.append(met_s)
+                                    except Exception as e:
+                                        st.error(f"Ошибка в строке {i+1}: {e}")
+                                        is_valid = False
+                                        break
+                                
+                                if is_valid:
+                                    try:
+                                        # Inject Base Analysis
+                                        z_code = z_map.get(d_zone)
+                                        a_code = a_map.get(d_action)
+                                        if z_code and (a_code or z_code == "Air"):
+                                            base_cls, base_prob = diver_engine.get_base_analysis(m_data, z_code, a_code)
+                                            m_data['cls'] = base_cls
+                                            m_data['prob_final'] = base_prob
+                                        
+                                        res_itb = diver_engine.run_intrabar_analysis(m_data, slices)
+                                        st.session_state['itb_result'] = res_itb
+                                    except Exception as e:
+                                        st.error(f"Ошибка движка ITB: {e}")
+                
+                # Show Result Persistent
+                if st.session_state.get('itb_result'):
+                    st.subheader("📊 Результат ITB")
+                    st.code(st.session_state['itb_result'], language="text")
 
 
 

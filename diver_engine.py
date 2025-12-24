@@ -1,5 +1,8 @@
 import math
 import re
+from datetime import datetime, timedelta
+from statistics import mean, stdev
+from collections import Counter
 
 # --- HELPER FUNCTIONS ---
 def sign(x):
@@ -822,3 +825,217 @@ def run_expert_analysis(metrics_data, zone, action):
         
     # 2. Generation
     return generate_diver_report(metrics_data, {'zone': zone, 'action': action})
+
+def get_base_analysis(metrics_data, zone, action):
+    """
+    Возвращает (cls, prob_final) для ITB, чтобы не дублировать логику.
+    """
+    flags = prepare_logic_flags(metrics_data, {'zone': zone, 'action': action})
+    aqs = calculate_aqs(metrics_data, flags)
+    cls, prob, summary, direction = classify_main(metrics_data, flags, aqs)
+    return cls, prob
+
+# --- 5. INTRABAR ANALYSIS (ITB) ---
+
+def tf_to_minutes(tf_str):
+    if not tf_str: return 0
+    tf_str = str(tf_str).lower()
+    if tf_str.endswith('m'): return int(tf_str[:-1])
+    if tf_str.endswith('h'): return int(tf_str[:-1]) * 60
+    if tf_str.endswith('d'): return int(tf_str[:-1]) * 1440
+    if tf_str.endswith('w'): return int(tf_str[:-1]) * 10080
+    return 0
+
+def parse_ts(ts_val):
+    try:
+        if isinstance(ts_val, datetime): return ts_val
+        return datetime.fromisoformat(str(ts_val).replace(' ', 'T')[:16])
+    except:
+        return None
+
+def run_intrabar_analysis(analyzed_candle, slices):
+    """
+    Выполняет внутрибаровый анализ (ITB) на основе нарезки младшего ТФ.
+    KB Section 5 & 6.2
+    """
+    
+    # === 1. ВАЛИДАЦИЯ (5.2) ===
+    required_fields = ['cvd_pct', 'clv_pct', 'doi_pct', 'price_sign', 'cvd_sign', 'ts', 'tf']
+    for f in required_fields:
+        if f not in analyzed_candle:
+            return f"❌ ОШИБКА ITB: Анализируемая свеча неполная. Нет поля: {f}"
+            
+    if not slices:
+         return "❌ ОШИБКА ITB: Пустая нарезка."
+
+    # Parse TS
+    ts_main_start = parse_ts(analyzed_candle['ts'])
+    main_dur = tf_to_minutes(analyzed_candle['tf'])
+    ts_main_end = ts_main_start + timedelta(minutes=main_dur)
+    
+    # Check Coverage
+    ts_slice_first = parse_ts(slices[0]['ts'])
+    slice_dur = tf_to_minutes(slices[0]['tf'])
+    ts_slice_last_end = parse_ts(slices[-1]['ts']) + timedelta(minutes=slice_dur) # Slice end
+    
+    # Allow small tolerance (e.g. 1 min)
+    if ts_slice_first > ts_main_start + timedelta(minutes=2): # Tolerance
+        return f"❌ ОШИБКА ITB: Нарезка начинается позже свечи ({ts_slice_first} > {ts_main_start})"
+        
+    if ts_slice_last_end < ts_main_end - timedelta(minutes=2):
+        return f"❌ ОШИБКА ITB: Нарезка заканчивается раньше свечи ({ts_slice_last_end} < {ts_main_end})"
+
+    # Check Continuity & Consistency
+    tf_slice = slices[0]['tf']
+    for i in range(len(slices)):
+        s = slices[i]
+        if s['tf'] != tf_slice:
+            return f"❌ ОШИБКА ITB: Разные ТФ в нарезке ({s['tf']} != {tf_slice})"
+        
+        if i < len(slices) - 1:
+            curr_end = parse_ts(s['ts']) + timedelta(minutes=tf_to_minutes(s['tf']))
+            next_start = parse_ts(slices[i+1]['ts'])
+            if curr_end != next_start:
+                 # Allow gap if it's small (sometimes data has seconds diff) but strict requires logic
+                 # Check delta
+                 diff = abs((next_start - curr_end).total_seconds())
+                 if diff > 60: # > 1 min gap
+                     return f"❌ ОШИБКА ITB: Разрыв времени между свечой {i+1} и {i+2}"
+    
+    # === 2. МЕТРИКИ (5.3) ===
+    
+    # A. SignStab
+    cvd_signs = [sign(s.get('cvd_pct', 0)) for s in slices]
+    dom_sign = sign(analyzed_candle.get('cvd_pct', 0))
+    match_count = sum(1 for s in cvd_signs if s == dom_sign)
+    sign_stab = match_count / len(slices)
+    
+    if sign_stab >= 0.75: q_sign = "STRONG"
+    elif sign_stab > 0.50: q_sign = "WEAK"
+    else: q_sign = "NOISE"
+    
+    # B. EdgeStab
+    ps = analyzed_candle.get('price_sign')
+    cs = analyzed_candle.get('cvd_sign')
+    
+    edge_match = 0
+    if ps == 1 and cs == -1: # BULL setup
+        target = 60
+        edge_match = sum(1 for s in slices if s.get('clv_pct', 0) >= target)
+    else: # BEAR or other
+        target = 40
+        edge_match = sum(1 for s in slices if s.get('clv_pct', 0) <= target)
+        
+    edge_stab = edge_match / len(slices)
+    
+    if edge_stab >= 0.75: q_edge = "STRONG"
+    elif edge_stab > 0.50: q_edge = "WEAK"
+    else: q_edge = "NOISE"
+    
+    # C. OI Stability
+    oi_vals = [abs(s.get('doi_pct', 0)) for s in slices]
+    avg_oi = mean(oi_vals) if oi_vals else 0
+    std_oi = stdev(oi_vals) if len(oi_vals) > 1 else 0
+    
+    # Logic: Stable if RELATIVE variation is low OR ABSOLUTE variation is negligible
+    is_stable_rel = (std_oi < (avg_oi * 0.5)) if avg_oi > 0.05 else False
+    is_stable_abs = (std_oi < 0.15) # Absolute tolerance
+    
+    if is_stable_rel or is_stable_abs:
+        q_oi = "STABLE"
+    else:
+        q_oi = "VOLATILE"
+        
+    # D. Divergence Decay
+    decay_flag = False
+    if len(slices) >= 4: # Need enough slices
+        mid = len(slices) // 2
+        p1 = slices[:mid]
+        p2 = slices[mid:]
+        
+        s1 = [sign(x.get('cvd_pct', 0)) for x in p1]
+        s2 = [sign(x.get('cvd_pct', 0)) for x in p2]
+        
+        def most_common(lst):
+            return Counter(lst).most_common(1)[0][0] if lst else 0
+            
+        d1 = most_common(s1)
+        d2 = most_common(s2)
+        
+        # If trend flipped or lost consistency (0)
+        if d1 != d2 and d1 != 0 and d2 != 0:
+            decay_flag = True
+            
+    # === 3. ВЕРОЯТНОСТЬ (5.4) ===
+    # Get base prob from analyzed candle (assumes pre-injection)
+    prob_base = analyzed_candle.get('prob_final', 50) 
+    cls_base = analyzed_candle.get('cls', 'UNKNOWN')
+    
+    intrabar_flag = "UNDEFINED"
+    prob_final_itb = prob_base
+    oi_comment = ""
+    
+    if sign_stab >= 0.75 and edge_stab >= 0.75:
+        intrabar_flag = "STRONG_CONFIRMATION"
+        if prob_base < 60: bonus = 30; cap = 95
+        elif prob_base < 80: bonus = 20; cap = 96
+        else: bonus = 10; cap = 98
+        prob_final_itb = min(prob_base + bonus, cap)
+        oi_comment = "ОИ стабилен." if q_oi == "STABLE" else "ОИ волатилен (нестабилен)."
+        if q_oi == "VOLATILE": prob_final_itb -= 5
+        
+    elif (sign_stab > 0.50 and sign_stab < 0.75) or (edge_stab > 0.50 and edge_stab < 0.75):
+        intrabar_flag = "WEAK_SUPPORT"
+        prob_final_itb = min(prob_base + 10, 92)
+        oi_comment = "Интрабар частично поддерживает."
+        
+    elif sign_stab <= 0.50 or edge_stab <= 0.50:
+        intrabar_flag = "NOISE"
+        # Logic: -20 penalty for noise (was -15)
+        prob_final_itb = max(prob_base - 20, 20)
+        if prob_final_itb < 30: cls_base = "НЕВОЗМОЖНО_КЛАССИФИЦИРОВАТЬ (Шум ITB)"
+        oi_comment = "Шум: сигнал держится ≤50% времени."
+        
+    else:
+        prob_final_itb = max(prob_base - 20, 10)
+        oi_comment = "Неопределенность."
+        
+    # Decay
+    if decay_flag:
+        prob_final_itb -= 20
+        
+    prob_final_itb = max(min(prob_final_itb, 99), 15)
+    
+    # === 4. ОТЧЕТ (6.2) ===
+    
+    report = f"""
+ВНУТРИБАРОВЫЙ АНАЛИЗ (ITB)
+═══════════════════════════════════════════════════════════════
+ 
+Анализируемая свеча: {analyzed_candle.get('ts')} | {analyzed_candle.get('tf')} | {analyzed_candle.get('symbol_clean')}
+Нарезка: {tf_slice} ({len(slices)} свечей)
+ 
+Базовый класс: {analyzed_candle.get('cls')}
+Базовая надёжность: {prob_base}%
+ 
+1. ДИНАМИКА ВНУТРИ СВЕЧИ
+---------------------------------------------------------------
+Агрессия (CVD): {q_sign} (Устойчивость: {sign_stab*100:.0f}%)
+Геометрия:      {q_edge} (Удержание формы: {edge_stab*100:.0f}%)
+Открытый интерес: {q_oi} (Волатильность: {std_oi:.2f})
+Распад дивергенции: {"⚠️ ОБНАРУЖЕН (-20%)" if decay_flag else "НЕТ"}
+
+2. ВЛИЯНИЕ НА СИГНАЛ
+---------------------------------------------------------------
+Базовая вероятность:   {prob_base}%
+Поправка ITB:          {prob_final_itb - prob_base:+d}% ({intrabar_flag})
+ИТОГОВАЯ ВЕРОЯТНОСТЬ:  {prob_final_itb}%
+ 
+Класс после ITB: {cls_base}
+ 
+3. ПОЯСНЕНИЕ
+---------------------------------------------------------------
+{oi_comment}
+{"Вероятность снижена за распад дивергенции (смена знака)." if decay_flag else ""}
+"""
+    return report
