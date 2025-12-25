@@ -1797,22 +1797,23 @@ if selected_tab == "Дивер":
                         placeholder="⚡️ Действие" if not is_air_d else "⛔️ Недоступно в воздухе",
                         disabled=is_air_d
                     )
+                # Define Maps (Shared Scope)
+                z_map = {
+                    "🌪 В воздухе": "Air",
+                    "🟢 Поддержка": "Support",
+                    "🔴 Сопротивление": "Resistance"
+                }
+                
+                a_map = {
+                    "🛡 Удержание": "AT_EDGE",
+                    "⚔️ Пробой": "BREAK",
+                    "🎣 Л.Пробой": "PROBE",
+                    "🪜 На границе": "AT_EDGE_BORDERLINE",
+                    "🕯 Тело на уровне": "AT_EDGE_TAIL"
+                }
+
                 with r3:
                     if st.button("🔮 Анализ", key=f"btn_{mk_base}", type="primary", use_container_width=True):
-                         # Mapping Logic (clean internal codes)
-                        z_map = {
-                            "🌪 В воздухе": "Air",
-                            "🟢 Поддержка": "Support",
-                            "🔴 Сопротивление": "Resistance"
-                        }
-                        
-                        a_map = {
-                            "🛡 Удержание": "AT_EDGE",
-                            "⚔️ Пробой": "BREAK",
-                            "🎣 Л.Пробой": "PROBE",
-                            "🪜 На границе": "AT_EDGE_BORDERLINE",
-                            "🕯 Тело на уровне": "AT_EDGE_TAIL"
-                        }
                         
                         zone_code = z_map.get(d_zone)
                         action_code = a_map.get(d_action)
@@ -1871,7 +1872,6 @@ if selected_tab == "Дивер":
                 
                 # Show Result Persistent
                 if st.session_state.get('itb_result'):
-                    st.subheader("📊 Результат ITB")
                     st.code(st.session_state['itb_result'], language="text")
 
 

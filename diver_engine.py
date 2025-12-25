@@ -611,7 +611,7 @@ def get_trade_status(prob_final, cls):
         else: return "НЕЙТРАЛЬНЫЙ"
     
     if cls == "ВСТРЕЧНЫЙ_НАБОР":
-        return "СИЛЬНЫЙ_СИГНАЛ" if prob_final >= 80 else "НЕЙТРАЛЬНЫЙ"
+        return "СИЛЬНЫЙ_СИГНАЛ" if prob_final >= 65 else "НЕЙТРАЛЬНЫЙ"
     
     if cls in ["РАСХОЖДЕНИЕ_БЕЗ_КЛАССА", "ДИВЕР_НА_КРОМКЕ"]:
         return "СИЛЬНЫЙ_СИГНАЛ" if prob_final >= 70 else "НЕЙТРАЛЬНЫЙ"
@@ -957,7 +957,12 @@ def run_intrabar_analysis(analyzed_candle, slices):
         s2 = [sign(x.get('cvd_pct', 0)) for x in p2]
         
         def most_common(lst):
-            return Counter(lst).most_common(1)[0][0] if lst else 0
+            if not lst: return 0
+            c = Counter(lst).most_common(2)
+            # If tie (e.g. 1 vs 1), return 0
+            if len(c) > 1 and c[0][1] == c[1][1]:
+                return 0
+            return c[0][0]
             
         d1 = most_common(s1)
         d2 = most_common(s2)
@@ -991,8 +996,8 @@ def run_intrabar_analysis(analyzed_candle, slices):
         
     elif sign_stab <= 0.50 or edge_stab <= 0.50:
         intrabar_flag = "NOISE"
-        # Logic: -20 penalty for noise (was -15)
-        prob_final_itb = max(prob_base - 20, 20)
+        # Logic: -15 penalty for noise (matched with Bot)
+        prob_final_itb = max(prob_base - 15, 20)
         if prob_final_itb < 30: cls_base = "НЕВОЗМОЖНО_КЛАССИФИЦИРОВАТЬ (Шум ITB)"
         oi_comment = "Шум: сигнал держится ≤50% времени."
         
