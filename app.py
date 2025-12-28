@@ -9,7 +9,10 @@ import base64
 import os
 import importlib
 import diver_engine
+import levels_engine
+import altair as alt
 importlib.reload(diver_engine) # Force reload to apply fixes
+importlib.reload(levels_engine)
 
 # --- Настройка страницы ---
 st.set_page_config(
@@ -1247,7 +1250,7 @@ else:
     st.title("🖤 VANTA")
 
 # --- NAVIGATION LOGIC ---
-TABS = ["Отчеты", "Свечи", "Дивер"]
+TABS = ["Отчеты", "Свечи", "Дивер", "Уровни"]
 
 # 1. Get current tab from URL or Session State
 query_params = st.query_params
@@ -1875,7 +1878,220 @@ if selected_tab == "Дивер":
                     st.code(st.session_state['itb_result'], language="text")
 
 
+# ==============================================================================
+# TAB 5: LEVELS (УРОВНИ)
+# ==============================================================================
+if selected_tab == "Уровни":
+    # 1. Filters (Same as Diver)
+    c1, c2, c3 = st.columns([1, 1.5, 3], gap="small")
+    
+    with c1:
+        # TF Multiselect
+        all_tfs = ["1h", "4h", "1d", "1w"]
+        selected_tfs_lvl = st.multiselect(
+            "TF", 
+            all_tfs, 
+            default=["4h", "1d"], 
+            placeholder="TF", 
+            label_visibility="collapsed",
+            key="levels_tf_filter"
+        )
+        
+    with c2:
+        # Date Range
+        date_range_lvl = st.date_input(
+            "Период", 
+            value=[], 
+            label_visibility="collapsed",
+            key="levels_date_filter"
+        )
+        
+    with c3:
+        if st.button("🚀 Рассчитать уровни", type="primary"):
+            st.session_state['levels_results'] = {} # Clear stale
+            st.session_state['pine_script_dynamic'] = ""
+            with st.spinner("Считаем уровни..."):
+                try:
+                    if not selected_tfs_lvl:
+                        st.error("⚠️ Выберите хотя бы один таймфрейм!")
+                    else:
+                        d_start, d_end = None, None
+                        if len(date_range_lvl) == 2:
+                             d_start, d_end = date_range_lvl
+                        elif len(date_range_lvl) == 1:
+                             d_start = date_range_lvl[0]
+                        
+                        # Data Collection
+                        levels_results = {}
+                        candles_data = {} # Store for visualization
+                        
+                        for tf in selected_tfs_lvl:
+                             # Build Query on unified 'candles' table
+                             # Handle case-sensitivity (try both '4h' and '4H')
+                             query = supabase.table("candles").select("*").in_("tf", [tf.lower(), tf.upper()]).order("ts", desc=True)
+                             
+                             if d_start:
+                                 query = query.gte("ts", d_start.isoformat())
+                             if d_end:
+                                 # End date + 1 day to cover the full day
+                                 d_end_full = d_end + timedelta(days=1)
+                                 query = query.lt("ts", d_end_full.isoformat())
+                             
+                             # Apply limit if no range (Specific Bot Defaults)
+                             if not d_start:
+                                 if tf == "4h":
+                                     limit_val = 180
+                                 elif tf == "1d":
+                                     limit_val = 365
+                                 else:
+                                     limit_val = 300
+                                 query = query.limit(limit_val)
+                             else:
+                                 query = query.limit(1000) # Hard limit for range safety
 
+                             res = query.execute()
+                             candles = res.data[::-1] if res.data else []
+                             
+                             if candles:
+                                 # Dynamic Max Levels: 1D -> 8, others -> 10
+                                 mx = 8 if tf == "1d" else 10
+                                 lvls = levels_engine.build_levels(candles, lookback=len(candles), max_levels=mx, timeframe=tf)
+                                 # Separate H/L clustering already done inside
+                                 
+                                 levels_results[tf.upper()] = lvls
+                                 candles_data[tf.upper()] = candles # Store for Viz
+                        
+                        st.session_state['levels_results'] = levels_results
+                        st.session_state['candles_data'] = candles_data
+                            
+                except Exception as e:
+                    st.error(f"Ошибка: {e}")
 
-    # 2. Analysis UI
+    # Results
+    if st.session_state.get('levels_results'):
+        st.divider()
+        
+        if not any(st.session_state['levels_results'].values()):
+             st.warning("⚠️ Уровни не найдены. Попробуйте увеличить историю (Limit) или выбрать другой период.")
+
+        # 1. Text Report (Copyable)
+        st.subheader("📋 Отчет (Copyable)")
+        
+        report_lines = []
+        for tf, lvls in st.session_state['levels_results'].items():
+            if not lvls:
+                line = f"**{tf} LEVELS:** (Нет уровней. Мало данных или низкая волатильность)"
+            else:
+                # Format: 2945.50 (x2)
+                segments = [f"{l['mid']:.2f} (x{l['touches']})" for l in lvls]
+                line = f"{tf} LEVELS: " + " / ".join(segments)
+            report_lines.append(line)
+            
+        full_report = "\n\n".join(report_lines)
+        st.code(full_report, language="markdown")
+        
+        # 2. Visualization (Candles + Levels)
+        st.subheader("📊 Визуализация (Chart)")
+        
+        # Tabs for Timeframes
+        tf_list = list(st.session_state['levels_results'].keys())
+        if tf_list:
+            tabs = st.tabs(tf_list)
+            
+            for i, tf in enumerate(tf_list):
+                with tabs[i]:
+                    lvls = st.session_state['levels_results'].get(tf, [])
+                    c_data = st.session_state.get('candles_data', {}).get(tf, [])
+                    
+                    if not c_data:
+                        st.info("Нет данных свечей для графика.")
+                        continue
+                        
+                    # Prepare DataFrames
+                    df_c = pd.DataFrame(c_data)
+                    # Ensure numeric and date
+                    # Helper to map keys if needed, but Supabase returns dicts matching columns usually
+                    # Assuming h, l, c, o, ts/time
+                    # Let's clean up column names just in case using extract_val logic or simpler mapping
+                    # Assuming standard keys exist
+                    
+                    # Normalize columns
+                    def get_col(row, keys):
+                        for k in keys:
+                            if k in row: return row[k]
+                        return 0
+                        
+                    df_c['Time'] = pd.to_datetime(df_c['ts']) if 'ts' in df_c.columns else pd.to_datetime(df_c['time'])
+                    df_c['Open'] = df_c.apply(lambda x: get_col(x, ['o', 'open']), axis=1)
+                    df_c['High'] = df_c.apply(lambda x: get_col(x, ['h', 'high']), axis=1)
+                    df_c['Low'] = df_c.apply(lambda x: get_col(x, ['l', 'low']), axis=1)
+                    df_c['Close'] = df_c.apply(lambda x: get_col(x, ['c', 'close']), axis=1)
+                    
+                    # Candle Layer
+                    base = alt.Chart(df_c).encode(
+                        x=alt.X('Time:T', title=None, axis=alt.Axis(format='%d %b %H:%M'))
+                    )
+                    
+                    rule = base.mark_rule().encode(
+                        y=alt.Y('Low:Q', title='Price (USDT)', scale=alt.Scale(zero=False)),
+                        y2='High:Q',
+                        color=alt.condition("datum.Open <= datum.Close", alt.value("#00C853"), alt.value("#D50000"))
+                    )
+                    
+                    bar = base.mark_bar().encode(
+                        y='Open:Q',
+                        y2='Close:Q',
+                        color=alt.condition("datum.Open <= datum.Close", alt.value("#00C853"), alt.value("#D50000")),
+                        tooltip=['Time', 'Open', 'High', 'Low', 'Close']
+                    )
+                    
+                    chart_candles = rule + bar
+                    
+                    # Levels Layer
+                    if lvls:
+                        df_req_l = []
+                        for l in lvls:
+                            df_req_l.append({
+                                "Price": l['mid'],
+                                "Type": "R" if l['kind'] == 'R' else "S",
+                                "Touches": l['touches']
+                            })
+                        df_l = pd.DataFrame(df_req_l)
+                        
+                        # Use a dummy base for levels to allow full width rules?
+                        # Altair rules without X encoding span the width.
+                        # But we need to layer them over time axis.
+                        # Actually, if we just use 'y' encoding on a separate data source, it should work as annotation lines.
+                        
+                        base_l = alt.Chart(df_l).encode(
+                            y=alt.Y('Price:Q')
+                        )
+                        
+                        lvl_rules = base_l.mark_rule().encode(
+                            color=alt.Color('Type:N', scale=alt.Scale(domain=['S', 'R'], range=['green', 'red']), legend=None),
+                            size=alt.Size('Touches:Q', scale=alt.Scale(range=[1, 3]), legend=None),
+                            opacity=alt.value(0.7),
+                            tooltip=['Type', 'Price', 'Touches']
+                        )
+                        
+                        lvl_text = base_l.mark_text(align='left', dx=2, dy=-5).encode(
+                            text=alt.Text('Price', format=".2f"),
+                            color=alt.value('white') # Assuming dark mode
+                        )
+                        
+                        final_chart = (chart_candles + lvl_rules + lvl_text).properties(
+                            title=f"{tf} Chart with Levels",
+                            width='container',
+                            height=600
+                        ).interactive()
+                        
+                        st.altair_chart(final_chart, use_container_width=True)
+                    else:
+                        st.altair_chart(chart_candles.properties(width='container', height=600).interactive(), use_container_width=True)
+
+        
+        # Details Expander (Hidden, Debug)
+        with st.expander("hidden details (debug)"): 
+             # ... existing debug view code if needed
+             pass
 
