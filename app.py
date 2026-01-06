@@ -11,6 +11,9 @@ import importlib
 import diver_engine
 import levels_engine
 import altair as alt
+import parsing_engine 
+importlib.reload(parsing_engine) # Force reload
+from parsing_engine import parse_value_raw, extract, fmt_num, parse_raw_input, calculate_metrics, generate_full_report
 importlib.reload(diver_engine) # Force reload to apply fixes
 importlib.reload(levels_engine)
 
@@ -172,443 +175,14 @@ def load_configurations():
         return None
 
 # --- 🛠 Хелперы Парсинга ---
-def parse_value_raw(val_str):
-    """Парсит строки с K, M, B, %, запятыми в float."""
-    if not val_str or val_str == '-' or val_str == '': return 0.0
-    
-    clean_str = str(val_str).replace(',', '').replace('%', '').strip()
-    multiplier = 1.0
-    
-    if clean_str.upper().endswith('K'):
-        multiplier = 1_000.0
-        clean_str = clean_str[:-1]
-    elif clean_str.upper().endswith('M'):
-        multiplier = 1_000_000.0
-        clean_str = clean_str[:-1]
-    elif clean_str.upper().endswith('B'):
-        multiplier = 1_000_000_000.0
-        clean_str = clean_str[:-1]
-        
-    try:
-        clean_str = re.sub(r'[^\d.-]', '', clean_str)
-        return round(float(clean_str) * multiplier, 2)
-    except:
-        return 0.0
-
-def extract(regex, text):
-    # Добавили DOTALL, чтобы искать по всему тексту даже с переносами строк
-    match = re.search(regex, text, re.IGNORECASE | re.DOTALL)
-    if match: return parse_value_raw(match.group(1))
-    return None
+# MOVED TO parsing_engine.py
+# (Imports added at top)
 
 # --- 🧠 ЯДРО: 1. RAW INPUT PARSING (ИСПРАВЛЕНО) ---
-def parse_raw_input(text):
-    """Парсит сырой текст в словарь Raw Input согласно спецификации."""
-    data = {}
-    data['raw_data'] = text.strip()
-    
-    # Флаги для надежности: Игнор регистра и Точка=все символы (вкл перенос строки)
-    REGEX_FLAGS = re.IGNORECASE | re.DOTALL
-
-    # Метаданные
-    header_match = re.search(r'(.+?) · (.+?) · (\w+)', text)
-    data['exchange'] = header_match.group(1).strip() if header_match else 'Unknown'
-    data['raw_symbol'] = header_match.group(2).strip() if header_match else 'Unknown'
-    data['tf'] = header_match.group(3).strip() if header_match else '4h'
-    
-    # Очистка тикера
-    data['symbol_clean'] = data['raw_symbol'].split(' ')[0].replace('USDT', '').replace('PERP', '')
-    
-    # Поиск явного таймстемпа в тексте (dd.mm.yyyy HH:MM:SS или HH:MM)
-    ts_match = re.search(r'(\d{1,2}\.\d{1,2}\.\d{4}\s+\d{1,2}:\d{2}(?::\d{2})?)', text)
-    if ts_match:
-        ts_str = ts_match.group(1)
-        try:
-            # Try with seconds
-            dt_obj = datetime.strptime(ts_str, "%d.%m.%Y %H:%M:%S")
-            data['ts'] = dt_obj.isoformat()
-            data['parsed_ts'] = data['ts'] 
-        except ValueError:
-            try:
-                # Try without seconds
-                dt_obj = datetime.strptime(ts_str, "%d.%m.%Y %H:%M")
-                data['ts'] = dt_obj.isoformat()
-                data['parsed_ts'] = data['ts'] 
-            except:
-                 raise ValueError("Неверный формат даты/времени. Ожидается DD.MM.YYYY HH:MM")
-    else:
-        # User requested NO silent default. 
-        # But we must check if 'pending_ts' logic in caller handles this?
-        # The caller (process_raw_text_batch) relies on data['ts'] or data['parsed_ts'].
-        # If we return without TS, the caller might fill it from pending_ts.
-        # So we should strictly NOT set 'ts' here if not found, to let caller decide or fail.
-        # However, user said "let warning pop up that they are mandatory".
-        # So we leave it empty here?
-        pass
-
-    # OHLC
-    ohlc_match = re.search(r'O\s+([\d,.]+)\s+H\s+([\d,.]+)\s+L\s+([\d,.]+)\s+C\s+([\d,.]+)', text)
-    if ohlc_match:
-        data['open'] = parse_value_raw(ohlc_match.group(1))
-        data['high'] = parse_value_raw(ohlc_match.group(2))
-        data['low'] = parse_value_raw(ohlc_match.group(3))
-        data['close'] = parse_value_raw(ohlc_match.group(4))
-    else:
-        # Заглушки, чтобы не ломать вычисления
-        data['open'] = data['high'] = data['low'] = data['close'] = 0.0
-    
-    # Volume & Change
-    # Volume
-    data['volume'] = extract(r'V ([\d,.]+[MKB]?)', text)
-    
-    # Change & Amplitude (Compound parsing)
-    # Ex: Change -3.81(-0.12%) Amplitude 29.72(0.92%)
-    ch_match = re.search(r'Change\s+([+\-]?[\d,.]+)\s*\(([+\-]?[\d,.]+)%\)', text, REGEX_FLAGS)
-    if ch_match:
-        data['change_abs'] = parse_value_raw(ch_match.group(1))
-        data['change_pct'] = parse_value_raw(ch_match.group(2))
-    else:
-        # Fallback if distinct
-        data['change_abs'] = extract(r'Change\s+([+\-]?[\d,.]+)', text)
-        data['change_pct'] = extract(r'Change.*?([+\-]?[\d,.]+)%', text)
-
-    amp_match = re.search(r'Amplitude\s+([\d,.]+)\s*\(([\d,.]+)%\)', text, REGEX_FLAGS)
-    if amp_match:
-        data['amplitude_abs'] = parse_value_raw(amp_match.group(1))
-        data['amplitude_pct'] = parse_value_raw(amp_match.group(2))
-    else:
-        data['amplitude_abs'] = extract(r'Amplitude\s+([\d,.]+)', text)
-        data['amplitude_pct'] = extract(r'Amplitude.*?([\d,.]+)%', text)
-    
-    # Active Volume
-    data['buy_volume'] = extract(r'Active Buy/Sell Volume.*?Buy\s+([+\-]?[\d,.]+[MKB]?)', text)
-    data['sell_volume'] = extract(r'Active Buy/Sell Volume.*?Sell\s+([+\-]?[\d,.]+[MKB]?)', text)
-    if data['sell_volume'] is not None: data['sell_volume'] = abs(data['sell_volume'])
-    data['abv_delta'] = extract(r'Active Buy/Sell Volume.*?Delta\s+([+\-]?[\d,.]+[MKB]?)', text)
-    data['abv_ratio'] = extract(r'Active Buy/Sell Volume.*?Ratio\s+([+\-]?[\d,.]+)', text)
-    
-    # Trades
-    data['buy_trades'] = extract(r'Active Buy/Sell Trades.*?Buy ([+\-]?[\d,.]+[MKB]?)', text)
-    data['sell_trades'] = extract(r'Active Buy/Sell Trades.*?Sell ([+\-]?[\d,.]+[MKB]?)', text)
-    if data['sell_trades'] is not None: data['sell_trades'] = abs(data['sell_trades'])
-    data['trades_delta'] = extract(r'Active Buy/Sell Trades.*?Delta ([+\-]?[\d,.]+[MKB]?)', text)
-    data['trades_ratio'] = extract(r'Active Buy/Sell Trades.*?Ratio ([+\-]?[\d,.]+)', text)
-
-    # Open Interest
-    oi_match = re.search(r'Open Interest.*?O ([\d,.]+[MKB]?) H ([\d,.]+[MKB]?) L ([\d,.]+[MKB]?) C ([\d,.]+[MKB]?)', text, REGEX_FLAGS)
-    if oi_match:
-        data['oi_open'] = parse_value_raw(oi_match.group(1))
-        data['oi_high'] = parse_value_raw(oi_match.group(2))
-        data['oi_low'] = parse_value_raw(oi_match.group(3))
-        data['oi_close'] = parse_value_raw(oi_match.group(4))
-
-    # Liquidations
-    data['liq_long'] = extract(r'Liquidation Long ([\d,.]+[MKB]?)', text)
-    data['liq_short'] = extract(r'Liquidation.*?Short ([+\-]?[\d,.]+[MKB]?)', text)
-    if data['liq_short'] is not None: data['liq_short'] = abs(data['liq_short'])
-
-    # --- COINGLASS FIELDS PARSING (ИСПРАВЛЕНО С REGEX FLAGS) ---
-    
-    # Funding Rate (exclude Aggregated)
-    fr_match = re.search(r'(?<!Aggregated )Funding Rate.*?O ([+\-]?[\d,.]+%?).*?H ([+\-]?[\d,.]+%?).*?L ([+\-]?[\d,.]+%?).*?C ([+\-]?[\d,.]+%?)', text, REGEX_FLAGS)
-    if fr_match:
-        data['fr_open'] = parse_value_raw(fr_match.group(1))
-        data['fr_high'] = parse_value_raw(fr_match.group(2))
-        data['fr_low'] = parse_value_raw(fr_match.group(3))
-        data['fr_close'] = parse_value_raw(fr_match.group(4))
-    
-    # Aggregated Funding Rate
-    agg_fr_match = re.search(r'Aggregated Funding Rate.*?O ([+\-]?[\d,.]+%?).*?H ([+\-]?[\d,.]+%?).*?L ([+\-]?[\d,.]+%?).*?C ([+\-]?[\d,.]+%?)', text, REGEX_FLAGS)
-    if agg_fr_match:
-        data['agg_fr_open'] = parse_value_raw(agg_fr_match.group(1))
-        data['agg_fr_high'] = parse_value_raw(agg_fr_match.group(2))
-        data['agg_fr_low'] = parse_value_raw(agg_fr_match.group(3))
-        data['agg_fr_close'] = parse_value_raw(agg_fr_match.group(4))
-
-    # Basis
-    data['basis'] = extract(r'Basis\s+([+\-]?[\d,.]+)', text)
-
-    # Long/Short Ratio
-    ls_match = re.search(r'Long/Short Ratio.*?O ([+\-]?[\d,.]+).*?H ([+\-]?[\d,.]+).*?L ([+\-]?[\d,.]+).*?C ([+\-]?[\d,.]+)', text, REGEX_FLAGS)
-    if ls_match:
-        data['ls_ratio_open'] = parse_value_raw(ls_match.group(1))
-        data['ls_ratio_high'] = parse_value_raw(ls_match.group(2))
-        data['ls_ratio_low'] = parse_value_raw(ls_match.group(3))
-        data['ls_ratio_close'] = parse_value_raw(ls_match.group(4))
-
-    # Index Price
-    idx_match = re.search(r'Index Price.*?O ([\d,.]+).*?H ([\d,.]+).*?L ([\d,.]+).*?C ([\d,.]+)', text, REGEX_FLAGS)
-    if idx_match:
-        data['idx_open'] = parse_value_raw(idx_match.group(1))
-        data['idx_high'] = parse_value_raw(idx_match.group(2))
-        data['idx_low'] = parse_value_raw(idx_match.group(3))
-        data['idx_close'] = parse_value_raw(idx_match.group(4))
-
-    # Net Longs (Используем .*? для надежности между числами)
-    nl_match = re.search(r'Net Longs.*?O ([+\-]?[\d,.]+[MKB]?).*?C ([+\-]?[\d,.]+[MKB]?).*?(?:Delta|Δ) ([+\-]?[\d,.]+[MKB]?)', text, REGEX_FLAGS)
-    if nl_match:
-        data['net_longs_open'] = parse_value_raw(nl_match.group(1))
-        data['net_longs_close'] = parse_value_raw(nl_match.group(2))
-        data['net_longs_delta'] = parse_value_raw(nl_match.group(3))
-
-    # Net Shorts
-    ns_match = re.search(r'Net Shorts.*?O ([+\-]?[\d,.]+[MKB]?).*?C ([+\-]?[\d,.]+[MKB]?).*?(?:Delta|Δ) ([+\-]?[\d,.]+[MKB]?)', text, REGEX_FLAGS)
-    if ns_match:
-        data['net_shorts_open'] = parse_value_raw(ns_match.group(1))
-        data['net_shorts_close'] = parse_value_raw(ns_match.group(2))
-        data['net_shorts_delta'] = parse_value_raw(ns_match.group(3))
-    
-    
-    # Check for missing critical fields    
-    critical_fields = [
-        'ts', 'exchange', 'raw_symbol', 'symbol_clean', 'tf', 
-        'open', 'high', 'low', 'close', 'volume', 
-        'change_abs', 'change_pct', 'amplitude_abs', 'amplitude_pct', 
-        'buy_volume', 'sell_volume', 'abv_delta', 'abv_ratio', 
-        'buy_trades', 'sell_trades', 'trades_delta', 'trades_ratio', 
-        'oi_open', 'oi_high', 'oi_low', 'oi_close', 
-        'liq_long', 'liq_short'
-    ]
-    missing = [f for f in critical_fields if data.get(f) is None]
-    if missing:
-        data['missing_fields'] = missing
-
-    return data
+# MOVED TO parsing_engine.py
 
 # --- 🧠 ЯДРО: 2. CALCULATED METRICS ---
-def calculate_metrics(raw_data, config):
-    """Считает метрики на основе Raw Input и конфигов из БД."""
-    m = raw_data.copy()
-    
-    # 1. Geometry
-    m['range'] = m.get('high', 0) - m.get('low', 0)
-    m['range_pct'] = (m['range'] / m['close'] * 100) if m.get('close') else 0
-    
-    # Body and CLV
-    rng = m['range']
-    o_px = m.get('open', 0)
-    c_px = m.get('close', 0)
-    h_px = m.get('high', 0)
-    l_px = m.get('low', 0)
-    
-    if rng > 0:
-        m['body_pct'] = (abs(c_px - o_px) / rng * 100)
-        m['clv_pct'] = ((c_px - l_px) / rng * 100)
-        m['upper_tail_pct'] = ((h_px - max(o_px, c_px)) / rng * 100)
-        m['lower_tail_pct'] = ((min(o_px, c_px) - l_px) / rng * 100)
-    else:
-        m['body_pct'] = 0
-        m['clv_pct'] = 50.0
-        m['upper_tail_pct'] = 0
-        m['lower_tail_pct'] = 0
-
-    m['price_sign'] = 1 if m.get('close', 0) >= m.get('open', 0) else -1
-
-    # 2. Volume & Trades Metrics
-    total_active_vol = (m.get('buy_volume') or 0) + (m.get('sell_volume') or 0)
-    
-    # CVD defaults to None if no data, else calculates
-    if m.get('abv_delta') is not None and total_active_vol > 0:
-        m['cvd_pct'] = (m.get('abv_delta') / total_active_vol * 100)
-    else:
-        m['cvd_pct'] = None
-    m['cvd_sign'] = 1 if m.get('abv_delta', 0) > 0 else -1
-    m['cvd_small'] = abs(m['cvd_pct']) < 1.0 
-
-    # Trades: Propagate None
-    b_trades = m.get('buy_trades')
-    s_trades = m.get('sell_trades')
-    
-    if b_trades is not None and s_trades is not None:
-        # Recalculate precision delta instead of parsed partial
-        m['trades_delta'] = b_trades - s_trades 
-        total_trades = b_trades + s_trades
-        m['dtrades_pct'] = (m['trades_delta'] / total_trades * 100) if total_trades else 0
-    else:
-        total_trades = None
-        m['dtrades_pct'] = None
-    
-    sign_abv = (m.get('abv_delta', 0) > 0) - (m.get('abv_delta', 0) < 0)
-    sign_trades = (m.get('trades_delta', 0) > 0) - (m.get('trades_delta', 0) < 0)
-    m['ratio_stable'] = (sign_abv == sign_trades)
-
-    m['avg_trade_buy'] = (m.get('buy_volume') / b_trades) if (m.get('buy_volume') is not None and b_trades) else None
-    m['avg_trade_sell'] = (m.get('sell_volume') / s_trades) if (m.get('sell_volume') is not None and s_trades) else None
-    
-    if m.get('avg_trade_buy') and m.get('avg_trade_sell'):
-        m['tilt_pct'] = ((m['avg_trade_sell'] / m['avg_trade_buy']) - 1) * 100
-    else:
-        m['tilt_pct'] = None
-
-    m['implied_price'] = (m.get('volume', 0) / total_active_vol) if total_active_vol else 0
-    m['dpx'] = m['price_sign'] * m['cvd_sign'] 
-    
-    if m['dpx'] == 1: m['price_vs_delta'] = "match"
-    elif m['dpx'] == -1: m['price_vs_delta'] = "div"
-    else: m['price_vs_delta'] = "neutral"
-
-    # 3. Open Interest Calculations
-    if m.get('oi_open') and m.get('oi_close') is not None:
-         m['doi_pct'] = ((m.get('oi_close') - m.get('oi_open')) / m.get('oi_open') * 100)
-    else:
-         m['doi_pct'] = None
-    
-    oi_rng = m.get('oi_high', 0) - m.get('oi_low', 0)
-    if oi_rng == 0: m['oipos'] = 0.5
-    else:
-        raw_pos = (m.get('oi_close', 0) - m.get('oi_low', 0)) / oi_rng
-        m['oipos'] = max(0.0, min(1.0, raw_pos))
-
-    # OI Path & OE (Restored & Safe)
-    oh = m.get('oi_high')
-    ol = m.get('oi_low')
-    oo = m.get('oi_open')
-    
-    if oh is not None and ol is not None and oo is not None:
-        up_move = abs(oh - oo)
-        dn_move = abs(ol - oo)
-        if up_move > dn_move: m['oi_path'] = "up"
-        elif dn_move > up_move: m['oi_path'] = "down"
-        else: m['oi_path'] = "neutral"
-    else:
-        m['oi_path'] = None
-
-    c_pct = m.get('change_pct')
-    # If change_pct came as 0.0 (from text parsing) but we have absolute change, recalculate precision
-    if (c_pct == 0 or c_pct is None) and m.get('change_abs') and m.get('close'):
-         c_pct = abs(m['change_abs']) / m['close'] * 100 * (1 if m.get('price_sign', 1) == 1 else -1)
-         m['change_pct'] = c_pct
-
-    if m.get('doi_pct') is not None and c_pct:
-        m['oe'] = abs(m['doi_pct']) / abs(c_pct)
-    else:
-        m['oe'] = None
-
-    # 4. Liquidations: Propagate None
-    liq_l = m.get('liq_long')
-    liq_s = m.get('liq_short')
-    total_liq = None
-    
-    if liq_l is not None and liq_s is not None:
-        total_liq = liq_l + liq_s
-        m['liq_share_pct'] = (total_liq / m.get('volume', 0) * 100) if m.get('volume', 0) else 0
-        m['limb_pct'] = ((liq_s - liq_l) / total_liq * 100) if total_liq else 0
-    else:
-        total_liq = None
-        m['liq_share_pct'] = None
-        m['limb_pct'] = None
-        
-    m['liq_squeeze'] = (m['liq_share_pct'] >= config['global_squeeze_limit']) if m.get('liq_share_pct') is not None else False
-    m['liq_threshold'] = config.get('global_squeeze_limit', 0.30)
-
-
-
-    # 5. Dominant Reject
-    LT, UT, Body, CLV = m['lower_tail_pct'], m['upper_tail_pct'], m['body_pct'], m['clv_pct']
-    dr = None
-    if (LT >= 3 * Body) and (UT <= 10) and (CLV >= 85): dr = "bull_Ideal"
-    elif (UT >= 3 * Body) and (LT <= 10) and (CLV <= 15): dr = "bear_Ideal"
-    elif (LT >= 2 * Body) and (UT <= 25) and (CLV >= 75): dr = "bull_Valid"
-    elif (UT >= 2 * Body) and (LT <= 25) and (CLV <= 25): dr = "bear_Valid"
-    elif (LT >= 1.5 * Body) and (CLV >= 65) and (UT <= 0.5 * LT): dr = "bull_Loose"
-    elif (UT >= 1.5 * Body) and (CLV <= 35) and (LT <= 0.5 * UT): dr = "bear_Loose"
-    m['dominant_reject'] = dr
-
-    # 6. Advanced Threshold Logic
-    porog_df = config.get('porog_doi', pd.DataFrame())
-    asset_coeffs = config.get('asset_coeffs', {})
-    tf_params = config.get('tf_params', {})
-    
-    # Keys for lookup
-    # 1. Porog Table: Columns are lowercase (btc, eth), TF column values might be mixed.
-    symbol_key_lower = m.get('symbol_clean', '').lower()
-    
-    # 2. Asset Coeffs: Keys are Uppercase (BTC, ETH). 
-    symbol_key_upper = m.get('symbol_clean', '').upper()
-    
-    tf_val = str(m.get('tf', '4h')) # Ensure string
-    tf_key = tf_val # Restore compatibility for later lines
-    
-    # Default values (Fallbacks)
-    base_sens = 0.5
-    coeff = 1.0
-    
-    # Dynamic Lookup: Base Sensitivity
-    if not porog_df.empty and symbol_key_lower in porog_df.columns and 'timeframe' in porog_df.columns:
-        # Case-insensitive TF match
-        # Convert both column and target value to lowercase for comparison
-        try:
-            # Create mask for matching timeframe
-            mask = porog_df['timeframe'].astype(str).str.lower() == tf_val.lower()
-            row = porog_df.loc[mask]
-            
-            if not row.empty:
-                base_sens = float(row[symbol_key_lower].values[0])
-        except Exception:
-            pass # Keep default if matching fails
-            
-    # Dynamic Lookup: Asset Coefficient
-    if symbol_key_upper in asset_coeffs:
-        coeff = asset_coeffs[symbol_key_upper]
-        
-    m['porog_final'] = base_sens * coeff
-    m['epsilon'] = 0.33 * m['porog_final']
-    m['oi_in_sens'] = abs(m['doi_pct']) <= m['porog_final']
-    
-    # K Params: Case-insensitive lookup for tf_params
-    k_set, k_ctr, k_unl = 1.0, 1.0, 1.0
-    tf_sens_base = None # Default is None (Strict Validation)
-    
-    # Try exact match first
-    tf_data = tf_params.get(tf_key)
-    
-    # If not found, try case-insensitive linear search
-    if not tf_data:
-        for k_tf, v_data in tf_params.items():
-            if str(k_tf).lower() == tf_key.lower():
-                tf_data = v_data
-                break
-    
-    if tf_data:
-        k_set = float(tf_data.get('k_set', 1.0))
-        k_ctr = float(tf_data.get('k_ctr', 1.0))
-        k_unl = float(tf_data.get('k_unl', 1.0))
-        # User defined 'sens' in tf_params for these metrics
-        if 'sens' in tf_data:
-            tf_sens_base = float(tf_data['sens'])
-
-    # Calculate T-thresholds using TF-specific Sens * K-factor
-    # (Removed asset coeff per user request)
-    
-    # Strict validation: Only calculate if we found a base sensitivity
-    if tf_sens_base is not None:
-        t_base = tf_sens_base 
-        
-        m['t_set_pct'] = round(t_base * k_set, 2)
-        m['oi_set'] = m['doi_pct'] >= m['t_set_pct']
-        
-        m['t_counter_pct'] = round(t_base * k_ctr, 2)
-        m['oi_counter'] = (m['dpx'] == -1) and (m['doi_pct'] >= m['t_counter_pct'])
-        
-        m['t_unload_pct'] = round(-(t_base * k_unl), 2)
-        m['oi_unload'] = m['doi_pct'] <= m['t_unload_pct']
-        
-        # Pass TF Sens to Diver Engine (as strictly requested)
-        m['tf_sens'] = tf_sens_base
-    else:
-        # Propagate None to trigger validation error downstream
-        m['t_set_pct'] = None
-        m['oi_set'] = None
-        m['t_counter_pct'] = None
-        m['oi_counter'] = None
-        m['t_unload_pct'] = None
-        m['oi_unload'] = None
-        m['tf_sens'] = None
-    
-    m['r_strength'] = abs(m['doi_pct']) / m['porog_final'] if m['porog_final'] else 0
-    m['r'] = m['r_strength']
-    
-    return m
+# MOVED TO parsing_engine.py
 
 # --- 🔄 СЛИЯНИЕ С БД (Merge-on-Parse) ---
 def fetch_and_merge_db(batch_data, config):
@@ -777,72 +351,9 @@ def update_candle_db(id, changes):
         return False
 
 # --- 📝 REPORTING ---
-def fmt_num(val, decimals=2, is_pct=False):
-    if val is None: return "−"
-    if isinstance(val, bool): return "true" if val else "false"
-    if isinstance(val, (int, float)):
-        s = f"{val:,.{decimals}f}".replace(",", " ").replace(".", ",")
-        if is_pct: s += "%"
-        return s
-    return str(val)
+# MOVED fmt_num, generate_full_report TO parsing_engine.py
+# (Imports at top)
 
-def generate_full_report(d):
-    ts_obj = datetime.fromisoformat(d['ts'])
-    ts_str = ts_obj.strftime("%d.%m.%Y %H:%M")
-    dr = d.get('dominant_reject') or "−"
-    
-    lines = [
-        f"ts: {ts_str}",
-        f"exchange: {d.get('exchange')}",
-        f"symbol: {d.get('raw_symbol')}",
-        f"tf: {d.get('tf')}",
-        f"open: {fmt_num(d.get('open'))}",
-        f"high: {fmt_num(d.get('high'))}",
-        f"low: {fmt_num(d.get('low'))}",
-        f"close: {fmt_num(d.get('close'))}",
-        f"volume: {fmt_num(d.get('volume'), 0)}",
-        f"buy_volume: {fmt_num(d.get('buy_volume'), 0)}",
-        f"sell_volume: {fmt_num(d.get('sell_volume'), 0)}",
-        f"buy_trades: {fmt_num(d.get('buy_trades'), 0)}",
-        f"sell_trades: {fmt_num(d.get('sell_trades'), 0)}",
-        f"oi_open: {fmt_num(d.get('oi_open'), 0)}",
-        f"oi_high: {fmt_num(d.get('oi_high'), 0)}",
-        f"oi_low: {fmt_num(d.get('oi_low'), 0)}",
-        f"oi_close: {fmt_num(d.get('oi_close'), 0)}",
-        f"liq_long: {fmt_num(d.get('liq_long'), 0)}",
-        f"liq_short: {fmt_num(d.get('liq_short'), 0)}",
-        f"range: {fmt_num(d.get('range'))}",
-        f"body_pct: {fmt_num(d.get('body_pct'), 2, True)}",
-        f"clv_pct: {fmt_num(d.get('clv_pct'), 2, True)}",
-        f"upper_tail_pct: {fmt_num(d.get('upper_tail_pct'), 2, True)}",
-        f"lower_tail_pct: {fmt_num(d.get('lower_tail_pct'), 2, True)}",
-        f"price_sign: {d.get('price_sign')}",
-        f"dominant_reject: {dr}",
-        f"cvd_pct: {fmt_num(d.get('cvd_pct'), 2, True)}",
-        f"cvd_sign: {d.get('cvd_sign')}",
-        f"cvd_small: {fmt_num(d.get('cvd_small'))}",
-        f"dpx: {fmt_num(d.get('dpx'))}",
-        f"price_vs_delta: {d.get('price_vs_delta')}",
-        f"dtrades_pct: {fmt_num(d.get('dtrades_pct'), 2, True)}",
-        f"ratio_stable: {fmt_num(d.get('ratio_stable'))}",
-        f"tilt_pct: {fmt_num(d.get('tilt_pct'), 2, True)}",
-        f"doi_pct: {fmt_num(d.get('doi_pct'), 2, True)}",
-        f"oi_in_sens: {fmt_num(d.get('oi_in_sens'))}",
-        f"oi_set: {fmt_num(d.get('oi_set'))}",
-        f"oi_counter: {fmt_num(d.get('oi_counter'))}",
-        f"oi_unload: {fmt_num(d.get('oi_unload'))}",
-        f"oipos: {fmt_num(d.get('oipos'), 2, True)}",
-        f"oi_path: {d.get('oi_path')}",
-        f"oe: {fmt_num(d.get('oe'))}",
-        f"liqshare_pct: {fmt_num(d.get('liq_share_pct'), 2, True)}",
-        f"limb_pct: {fmt_num(d.get('limb_pct'), 2, True)}",
-        f"liq_squeeze: {fmt_num(d.get('liq_squeeze'))}",
-        f"range_pct: {fmt_num(d.get('range_pct'), 2, True)}",
-        f"implied_price: {fmt_num(d.get('implied_price'))}",
-        f"avg_trade_buy: {fmt_num(d.get('avg_trade_buy'))}",
-        f"avg_trade_sell: {fmt_num(d.get('avg_trade_sell'))}"
-    ]
-    return "\n".join(lines)
 
 
 # --- 📊 ЛОГИКА КОМПОЗИТА (COMPOSITE) ---
@@ -1028,6 +539,7 @@ def process_raw_text_batch(raw_text):
     
     merged_groups = {}
     pending_ts = None
+    orphan_errors = [] # Initialize here to prevent UnboundLocalError
     TS_REGEX_STREAM = r'(\d{1,2}\.\d{1,2}\.\d{4}\s+\d{1,2}:\d{2}(?::\d{2})?)'
 
     # 2. Iterate & Parse
@@ -1078,18 +590,13 @@ def process_raw_text_batch(raw_text):
         else:
             pending_ts = None
 
+    
         # STRICT CHECK: If TS is still missing -> Error
         if not base_data.get('ts'):
-            # Convert to user friendly error, maybe skip or fail batch?
-            # User wants "Warning mandatory".
-            # We can add to orphan_errors or fail immediately?
-            # Let's add strict error which will be returned in orphan_errors list (as general errors)
-            # But the function returns (batch, errors).
-            # We need a way to say "This specific candle failed".
-            # For now, let's treat it as a critical error for this candle and not add it to merged_groups.
-            pass # We will handle this by checking required keys later?
-            # Or better, check here.
-            pass
+             # Create error similar to orphan logic
+             err = f"• {base_data.get('exchange')} {base_data.get('symbol_clean')} -> CRITICAL: Missing Timestamp"
+             orphan_errors.append(err) # We need to pass this out
+             continue # Skip processing for this candle
 
         # 2d. Grouping for DB Merge
         key = (base_data.get('exchange'), base_data.get('symbol_clean'), base_data.get('tf'), base_data.get('ts'))
@@ -1250,7 +757,10 @@ else:
     st.title("🖤 VANTA")
 
 # --- NAVIGATION LOGIC ---
-TABS = ["Отчеты", "Свечи", "Дивер", "Уровни"]
+import batch_parser
+importlib.reload(batch_parser)
+
+TABS = ["Отчеты", "Свечи", "Дивер", "Уровни", "Лаборатория"]
 
 # 1. Get current tab from URL or Session State
 query_params = st.query_params
@@ -1336,7 +846,7 @@ if selected_tab == "Отчеты":
             label = f"{ts_str} · {full_data.get('exchange')} · {full_data.get('symbol_clean')} · {full_data.get('tf')} · O {fmt_num(full_data.get('open'))}{warn_icon}"            
             with st.expander(label):
                 if full_data.get('missing_fields'):
-                    st.warning(f"Не найдены поля: {', '.join(full_data['missing_fields'])}")
+                    st.warning(f"⚠️ Отсутствуют данные: {', '.join(full_data['missing_fields'])}.\nЗначения заменены на 0, чтобы расчеты не упали.")
                 
                 with st.container(height=300):
                     # === DYNAMIC TABS (Option 1) ===
@@ -2095,3 +1605,74 @@ if selected_tab == "Уровни":
              # ... existing debug view code if needed
              pass
 
+
+
+if selected_tab == "Лаборатория":
+    # Text Area
+    lab_text = st.text_area("Batch Input", label_visibility="collapsed", height=300, key="lab_text_area", placeholder="Вставьте свечи и метки (Strong Up/Down)...")
+    
+    # Action Columns
+    col_lab_parse, col_lab_save, _ = st.columns([1, 2, 8])
+    
+    with col_lab_parse:
+        if st.button("🐾 ", type="primary"):
+            if not lab_text.strip():
+                st.warning("Введите текст.")
+            else:
+                st.session_state['lab_segments'], st.session_state['lab_candles'], st.session_state['lab_warnings'] = batch_parser.parse_batch_with_labels(lab_text)
+                st.session_state['lab_checked'] = True
+                st.rerun()
+
+    # Results Display
+    if st.session_state.get('lab_checked'):
+        st.divider()
+        warnings = st.session_state.get('lab_warnings', [])
+        segments = st.session_state.get('lab_segments', [])
+        candles = st.session_state.get('lab_candles', [])
+        
+        # 1. Warnings (Critical)
+        if warnings:
+            st.error(f"⚠️ ОБНАРУЖЕНО {len(warnings)} ПРОБЛЕМ")
+            for w in warnings:
+                st.markdown(f"- {w}")
+            st.warning("Рекомендуем исправить текст перед загрузкой, иначе проблемные сегменты будут пропущены.")
+        
+        # 2. Stats
+        st.write(f"**Найдено свечей:** {len(candles)}")
+        st.write(f"**Найдено сегментов (валидных):** {len(segments)}")
+        
+        # 3. Segments Table
+        if segments:
+            # Prepare DataFrame for nice view
+            seg_view = []
+            for s in segments:
+                imp = s['IMPULSE']
+                meta = s['META']
+                stats = s['CONTEXT']['STATS']
+                seg_view.append({
+                    "Symbol": meta['symbol'],
+                    "TF": meta['tf'],
+                    "Direction": f"{imp['y_size']} {imp['y_dir']}",
+                    "Candles": stats.get('candles_count'),
+                    "Vol (M)": f"{stats.get('sum_volume', 0)/1_000_000:.2f}M",
+                    "Liq Ratio": stats.get('liq_dominance_ratio')
+                })
+            st.dataframe(pd.DataFrame(seg_view), use_container_width=True)
+            
+            # Save Button (Only if segments exist)
+            with col_lab_save:
+                # Transactional Save
+                if st.button(f"💾 Загрузить {len(segments)} сегментов в БД", type="secondary"):
+                    with st.spinner("Тотальная запись (Транзакция)..."):
+                        try:
+                            s_count, c_count = batch_parser.save_batch_transactionally(supabase, segments, candles)
+                            st.success(f"✅ УСПЕХ! Записано: {s_count} сегментов, {c_count} свечей.")
+                            st.balloons()
+                            # Clear state
+                            st.session_state['lab_checked'] = False
+                            st.session_state['lab_segments'] = []
+                        except Exception as e:
+                            st.error(f"❌ ОШИБКА ЗАПИСИ: {e}")
+                            st.error("Транзакция отменена. Данные откатились (Rollback). База чиста.")
+        else:
+            st.info("Валидных сегментов не найдено.")
