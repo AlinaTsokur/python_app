@@ -25,9 +25,11 @@ def parse_value_raw(val_str):
         
     try:
         clean_str = re.sub(r'[^\d.-]', '', clean_str)
+        if not clean_str: return None
         return round(float(clean_str) * multiplier, 2)
-    except:
-        return 0.0
+    except (ValueError, TypeError) as e:
+        print(f"⚠️ Warning: Failed to parse '{val_str}': {e}")
+        return None
 
 def extract(regex, text):
     match = re.search(regex, text, re.IGNORECASE | re.DOTALL)
@@ -52,7 +54,9 @@ def parse_raw_input(text):
     REGEX_FLAGS = re.IGNORECASE | re.DOTALL
 
     # Meta
-    header_match = re.search(r'(.+?) · (.+?) · (\w+)', text)
+    # Fix: Anchor to start and consume timestamp to avoid capturing it in exchange name
+    # Matches: DD.MM.YYYY HH:MM[:SS] Exchange · Symbol · TF
+    header_match = re.search(r'^\s*\d{1,2}\.\d{1,2}\.\d{4}\s+\d{1,2}:\d{2}(?::\d{2})?\s+(.+?)\s+·\s+(.+?)\s+·\s+(\w+)', text)
     if header_match:
         data['exchange'] = header_match.group(1).strip()
         data['raw_symbol'] = header_match.group(2).strip()
@@ -68,20 +72,27 @@ def parse_raw_input(text):
         data['symbol_clean'] = None
     
     # TS
-    ts_match = re.search(r'(\d{1,2}\.\d{1,2}\.\d{4}\s+\d{1,2}:\d{2}(?::\d{2})?)', text)
+    # TS
+    # Capture parts to normalize single-digit hours
+    ts_match = re.search(r'(\d{1,2})\.(\d{1,2})\.(\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?', text)
     if ts_match:
-        ts_str = ts_match.group(1)
         try:
-            dt_obj = datetime.strptime(ts_str, "%d.%m.%Y %H:%M:%S")
+            day, month, year, hour, minute, second = ts_match.groups()
+            # Normalize to 2-digit components
+            ts_norm = f"{int(day):02d}.{int(month):02d}.{year} {int(hour):02d}:{minute}"
+            if second:
+                ts_norm += f":{second}"
+                fmt = "%d.%m.%Y %H:%M:%S"
+            else:
+                fmt = "%d.%m.%Y %H:%M"
+            
+            dt_obj = datetime.strptime(ts_norm, fmt)
             data['ts'] = dt_obj.isoformat()
             data['parsed_ts'] = data['ts'] 
-        except ValueError:
-            try:
-                dt_obj = datetime.strptime(ts_str, "%d.%m.%Y %H:%M")
-                data['ts'] = dt_obj.isoformat()
-                data['parsed_ts'] = data['ts'] 
-            except:
-                raise ValueError("Неверный формат даты/времени. Ожидается DD.MM.YYYY HH:MM")
+        except Exception as e:
+             # If strict parsing fails, don't crash, but don't fake data
+             print(f"⚠️ Warning: Timestamp parse failed: {e}")
+             data['ts'] = None
     else:
         pass
 
@@ -93,7 +104,12 @@ def parse_raw_input(text):
         data['low'] = parse_value_raw(ohlc_match.group(3))
         data['close'] = parse_value_raw(ohlc_match.group(4))
     else:
-        data['open'] = data['high'] = data['low'] = data['close'] = 0.0
+        # Strict: Do NOT zero-fill if OHLC is missing. 
+        # Missing data should remain None so explicit checks fail safely.
+        data['open'] = None
+        data['high'] = None
+        data['low'] = None
+        data['close'] = None
     
     # Volume
     data['volume'] = extract(r'V ([\d,.]+[MKB]?)', text)
@@ -184,6 +200,11 @@ def parse_raw_input(text):
         data['net_shorts_open'] = parse_value_raw(ns_match.group(1))
         data['net_shorts_close'] = parse_value_raw(ns_match.group(2))
         data['net_shorts_delta'] = parse_value_raw(ns_match.group(3))
+
+    liq_match = re.search(r'Liquidation.*?Long ([+\-]?[\d,.]+[MKB]?).*?Short ([+\-]?[\d,.]+[MKB]?)', text, REGEX_FLAGS)
+    if liq_match:
+        data['liq_long'] = abs(parse_value_raw(liq_match.group(1)))
+        data['liq_short'] = abs(parse_value_raw(liq_match.group(2)))
     
     critical_fields = [
         'ts', 'exchange', 'raw_symbol', 'symbol_clean', 'tf', 
@@ -197,12 +218,7 @@ def parse_raw_input(text):
     missing = [f for f in critical_fields if data.get(f) is None]
     if missing:
         data['missing_fields'] = missing
-        
-        # Zero-fill numeric metrics if missing, per user request
-        non_numeric_fields = ['ts', 'exchange', 'raw_symbol', 'symbol_clean', 'tf']
-        for f in missing:
-            if f not in non_numeric_fields:
-                data[f] = 0.0
+        # Strict: Do NOT zero-fill. Leave as None.
 
     return data
 
@@ -214,37 +230,56 @@ def calculate_metrics(raw_data, config):
     if not config: config = {}
     
     # 1. Geometry
-    m['range'] = m.get('high', 0) - m.get('low', 0)
-    m['range_pct'] = (m['range'] / m['close'] * 100) if m.get('close') else 0
-    
-    rng = m['range']
-    o_px = m.get('open', 0)
-    c_px = m.get('close', 0)
-    h_px = m.get('high', 0)
-    l_px = m.get('low', 0)
-    
-    if rng > 0:
-        m['body_pct'] = (abs(c_px - o_px) / rng * 100)
-        m['clv_pct'] = ((c_px - l_px) / rng * 100)
-        m['upper_tail_pct'] = ((h_px - max(o_px, c_px)) / rng * 100)
-        m['lower_tail_pct'] = ((min(o_px, c_px) - l_px) / rng * 100)
-    else:
-        m['body_pct'] = 0
-        m['clv_pct'] = 50.0
-        m['upper_tail_pct'] = 0
-        m['lower_tail_pct'] = 0
+    o_px = m.get('open')
+    c_px = m.get('close')
+    h_px = m.get('high')
+    l_px = m.get('low')
 
-    m['price_sign'] = 1 if m.get('close', 0) >= m.get('open', 0) else -1
+    m['range'] = None
+    m['range_pct'] = None
+    m['body_pct'] = None
+    m['clv_pct'] = None
+    m['upper_tail_pct'] = None
+    m['lower_tail_pct'] = None
+
+    if all(x is not None for x in [o_px, c_px, h_px, l_px]):
+        rng = h_px - l_px
+        m['range'] = rng
+        m['range_pct'] = (rng / c_px * 100) if c_px else 0
+        
+        if rng > 0:
+            m['body_pct'] = (abs(c_px - o_px) / rng * 100)
+            m['clv_pct'] = ((c_px - l_px) / rng * 100)
+            m['upper_tail_pct'] = ((h_px - max(o_px, c_px)) / rng * 100)
+            m['lower_tail_pct'] = ((min(o_px, c_px) - l_px) / rng * 100)
+        else:
+            m['body_pct'] = 0
+            m['clv_pct'] = 50.0
+            m['upper_tail_pct'] = 0
+            m['lower_tail_pct'] = 0
+            
+        m['price_sign'] = 1 if c_px >= o_px else -1
+    else:
+         m['price_sign'] = 0 # Neutral if no data
+
     m['price_vs_delta'] = "neutral" 
 
     # 2. Volume & Trades Metrics
-    total_active_vol = (m.get('buy_volume') or 0) + (m.get('sell_volume') or 0)
+    buy_vol = m.get('buy_volume')
+    sell_vol = m.get('sell_volume')
+    
+    total_active_vol = (buy_vol or 0) + (sell_vol or 0)
     
     if m.get('abv_delta') is not None and total_active_vol > 0:
         m['cvd_pct'] = (m.get('abv_delta') / total_active_vol * 100)
     else:
         m['cvd_pct'] = None
-    m['cvd_sign'] = 1 if m.get('abv_delta', 0) > 0 else -1
+    
+    delta = m.get('abv_delta')
+    if delta is None or delta == 0:
+        m['cvd_sign'] = 0
+    else:
+        m['cvd_sign'] = 1 if delta > 0 else -1
     m['cvd_small'] = abs(m['cvd_pct'] or 0) < 1.0 
 
     b_trades = m.get('buy_trades')
@@ -276,8 +311,11 @@ def calculate_metrics(raw_data, config):
     elif m['dpx'] == -1: m['price_vs_delta'] = "div"
 
     # 3. Open Interest
-    if m.get('oi_open') and m.get('oi_close') is not None:
-         m['doi_pct'] = ((m.get('oi_close') - m.get('oi_open')) / m.get('oi_open') * 100)
+    oo = m.get('oi_open')
+    oc = m.get('oi_close')
+    
+    if oo is not None and oc is not None and oo != 0:
+         m['doi_pct'] = ((oc - oo) / oo * 100)
     else:
          m['doi_pct'] = None
     
@@ -329,12 +367,15 @@ def calculate_metrics(raw_data, config):
     # 5. Dominant Reject
     LT, UT, Body, CLV = m['lower_tail_pct'], m['upper_tail_pct'], m['body_pct'], m['clv_pct']
     dr = None
-    if (LT >= 3 * Body) and (UT <= 10) and (CLV >= 85): dr = "bull_Ideal"
-    elif (UT >= 3 * Body) and (LT <= 10) and (CLV <= 15): dr = "bear_Ideal"
-    elif (LT >= 2 * Body) and (UT <= 25) and (CLV >= 75): dr = "bull_Valid"
-    elif (UT >= 2 * Body) and (LT <= 25) and (CLV <= 25): dr = "bear_Valid"
-    elif (LT >= 1.5 * Body) and (CLV >= 65) and (UT <= 0.5 * LT): dr = "bull_Loose"
-    elif (UT >= 1.5 * Body) and (CLV <= 35) and (LT <= 0.5 * UT): dr = "bear_Loose"
+    
+    if all(x is not None for x in [LT, UT, Body, CLV]):
+        if (LT >= 3 * Body) and (UT <= 10) and (CLV >= 85): dr = "bull_Ideal"
+        elif (UT >= 3 * Body) and (LT <= 10) and (CLV <= 15): dr = "bear_Ideal"
+        elif (LT >= 2 * Body) and (UT <= 25) and (CLV >= 75): dr = "bull_Valid"
+        elif (UT >= 2 * Body) and (LT <= 25) and (CLV <= 25): dr = "bear_Valid"
+        elif (LT >= 1.5 * Body) and (CLV >= 65) and (UT <= 0.5 * LT): dr = "bull_Loose"
+        elif (UT >= 1.5 * Body) and (CLV <= 35) and (LT <= 0.5 * UT): dr = "bear_Loose"
+        
     m['dominant_reject'] = dr
 
     # 6. Advanced Threshold Logic

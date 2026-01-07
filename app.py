@@ -7,15 +7,12 @@ from supabase import create_client, Client
 import math
 import base64
 import os
-import importlib
 import diver_engine
 import levels_engine
 import altair as alt
 import parsing_engine 
-importlib.reload(parsing_engine) # Force reload
+# Reloads removed for production cleanliness
 from parsing_engine import parse_value_raw, extract, fmt_num, parse_raw_input, calculate_metrics, generate_full_report
-importlib.reload(diver_engine) # Force reload to apply fixes
-importlib.reload(levels_engine)
 
 # --- Настройка страницы ---
 st.set_page_config(
@@ -172,7 +169,7 @@ def load_configurations():
         return config
     except Exception as e:
         st.error(f"Ошибка загрузки конфигураций из БД: {e}")
-        return None
+        return {}
 
 # --- 🛠 Хелперы Парсинга ---
 # MOVED TO parsing_engine.py
@@ -533,69 +530,25 @@ def process_raw_text_batch(raw_text):
     if not config:
         return [], ["Configuration load failed"]
 
-    # 1. Split & Clean
-    raw_chunks = re.split(r'(?=(?:Binance|Bybit|OKX)\s+·)', raw_text, flags=re.IGNORECASE)
+    # 1. Split & Clean (Synced with batch_parser.py)
+    # Split by Timestamp (DD.MM.YYYY HH:MM)
+    # Use robust regex from batch_parser to keep TS at start of chunk
+    raw_chunks = re.split(r'(?m)^(?=\d{1,2}\.\d{1,2}\.\d{4}\s+\d{1,2}:\d{2})', raw_text)
     raw_chunks = [x.strip() for x in raw_chunks if x.strip()]
     
     merged_groups = {}
-    pending_ts = None
-    orphan_errors = [] # Initialize here to prevent UnboundLocalError
-    TS_REGEX_STREAM = r'(\d{1,2}\.\d{1,2}\.\d{4}\s+\d{1,2}:\d{2}(?::\d{2})?)'
+    orphan_errors = [] 
 
     # 2. Iterate & Parse
     for chunk in raw_chunks:
-        # 2a. Find trailing TS
-        next_ts = None
-        clean_chunk = chunk
-        all_ts = list(re.finditer(TS_REGEX_STREAM, chunk))
-        if all_ts:
-            last_match = all_ts[-1]
-            # Check if everything AFTER the match is just whitespace
-            suffix = chunk[last_match.end():]
-            if not suffix.strip(): 
-                next_ts = last_match.group(1)
-                clean_chunk = chunk[:last_match.start()].strip()
-
-        # 2b. Parse
-        # 2b. Parse
-        base_data = parse_raw_input(clean_chunk)
-        
-        # 2c. TS Forwarding Logic
-        if base_data.get('exchange') == 'Unknown':
-            if next_ts:
-                 pending_ts = next_ts
-                 next_ts = None 
-            elif base_data.get('parsed_ts'):
-                 pending_ts = base_data['parsed_ts']
-            continue
-
-        if pending_ts:
-            try:
-                try:
-                    dt = datetime.strptime(pending_ts, "%d.%m.%Y %H:%M:%S")
-                except ValueError:
-                    dt = datetime.strptime(pending_ts, "%d.%m.%Y %H:%M")
-                base_data['ts'] = dt.isoformat()
-                
-                # If we successfully patched TS, remove it from missing_fields
-                if 'missing_fields' in base_data and 'ts' in base_data['missing_fields']:
-                    base_data['missing_fields'].remove('ts')
-                    if not base_data['missing_fields']:
-                        del base_data['missing_fields']
-            except:
-                pass
-        
-        if next_ts:
-            pending_ts = next_ts
-        else:
-            pending_ts = None
-
+        # Standard parsing (Engine expects TS at start)
+        base_data = parse_raw_input(chunk)
     
-        # STRICT CHECK: If TS is still missing -> Error
+        # STRICT CHECK: If TS is missing -> Error
         if not base_data.get('ts'):
              # Create error similar to orphan logic
-             err = f"• {base_data.get('exchange')} {base_data.get('symbol_clean')} -> CRITICAL: Missing Timestamp"
-             orphan_errors.append(err) # We need to pass this out
+             err = f"• {base_data.get('exchange', 'Unknown')} {base_data.get('symbol_clean', 'Unknown')} -> CRITICAL: Missing Timestamp/Exchange"
+             orphan_errors.append(err) 
              continue # Skip processing for this candle
 
         # 2d. Grouping for DB Merge
@@ -757,8 +710,9 @@ else:
     st.title("🖤 VANTA")
 
 # --- NAVIGATION LOGIC ---
+import importlib
 import batch_parser
-importlib.reload(batch_parser)
+importlib.reload(batch_parser) # Force reload to apply fixes immediately
 
 TABS = ["Отчеты", "Свечи", "Дивер", "Уровни", "Лаборатория"]
 
@@ -1612,14 +1566,16 @@ if selected_tab == "Лаборатория":
     lab_text = st.text_area("Batch Input", label_visibility="collapsed", height=300, key="lab_text_area", placeholder="Вставьте свечи и метки (Strong Up/Down)...")
     
     # Action Columns
-    col_lab_parse, col_lab_save, _ = st.columns([1, 2, 8])
+    col_lab_parse, col_lab_save, col_lab_status = st.columns([1, 3, 7])
     
     with col_lab_parse:
         if st.button("🐾 ", type="primary"):
             if not lab_text.strip():
                 st.warning("Введите текст.")
             else:
-                st.session_state['lab_segments'], st.session_state['lab_candles'], st.session_state['lab_warnings'] = batch_parser.parse_batch_with_labels(lab_text)
+                # Load config to ensure calculate_metrics works fully
+                lab_config = load_configurations()
+                st.session_state['lab_segments'], st.session_state['lab_candles'], st.session_state['lab_warnings'] = batch_parser.parse_batch_with_labels(lab_text, config=lab_config)
                 st.session_state['lab_checked'] = True
                 st.rerun()
 
@@ -1639,34 +1595,40 @@ if selected_tab == "Лаборатория":
         
         # 2. Stats
         st.write(f"**Найдено свечей:** {len(candles)}")
-        st.write(f"**Найдено сегментов (валидных):** {len(segments)}")
         
         # 3. Segments Table
         if segments:
-            # Prepare DataFrame for nice view
-            seg_view = []
-            for s in segments:
-                imp = s['IMPULSE']
+            # Display Segments Table
+            seg_data = []
+            for i, s in enumerate(segments): # Changed parsed_batch to segments
                 meta = s['META']
                 stats = s['CONTEXT']['STATS']
-                seg_view.append({
-                    "Symbol": meta['symbol'],
-                    "TF": meta['tf'],
-                    "Direction": f"{imp['y_size']} {imp['y_dir']}",
+                imp = s['IMPULSE']
+                
+                row = {
+                    "Symbol": meta.get('symbol', 'Unknown'), # Changed raw_symbol to symbol
+                    "TF": meta.get('tf', 'Unknown'),
+                    "Direction": imp.get('y_dir'), # "UP" / "DOWN"
+                    "Strength": imp.get('y_size'), # "Weak" / "Medium" / "Strong"
                     "Candles": stats.get('candles_count'),
                     "Vol (M)": f"{stats.get('sum_volume', 0)/1_000_000:.2f}M",
                     "Liq Ratio": stats.get('liq_dominance_ratio')
-                })
-            st.dataframe(pd.DataFrame(seg_view), use_container_width=True)
+                }
+                seg_data.append(row)
+            
+            # Display Table
+            if seg_data:
+                st.dataframe(pd.DataFrame(seg_data), use_container_width=True)
             
             # Save Button (Only if segments exist)
             with col_lab_save:
                 # Transactional Save
-                if st.button(f"💾 Загрузить {len(segments)} сегментов в БД", type="secondary"):
+                if st.button(f"💾 Загрузить {len(segments)} сегментов в БД", type="primary"):
                     with st.spinner("Тотальная запись (Транзакция)..."):
                         try:
                             s_count, c_count = batch_parser.save_batch_transactionally(supabase, segments, candles)
-                            st.success(f"✅ УСПЕХ! Записано: {s_count} сегментов, {c_count} свечей.")
+                            with col_lab_status:
+                                st.success(f"✅ УСПЕХ! Записано: {s_count} сегментов, {c_count} свечей.")
                             st.balloons()
                             # Clear state
                             st.session_state['lab_checked'] = False

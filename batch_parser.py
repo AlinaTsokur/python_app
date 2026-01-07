@@ -2,7 +2,7 @@ import re
 import math
 from datetime import datetime
 import pandas as pd
-from parsing_engine import parse_raw_input, calculate_metrics
+from parsing_engine import parse_raw_input, calculate_metrics, generate_full_report
 
 # --- 3. STATS CALCULATION (Architecture V5) ---
 def calculate_stats_agg(candles):
@@ -12,54 +12,123 @@ def calculate_stats_agg(candles):
     c_first = candles[0]
     c_last = candles[-1]
     
-    sum_vol = sum((c.get('volume') or 0) for c in candles)
-    sum_cvd = sum((c.get('cvd_pct') or 0) for c in candles) 
+    # Strict Sums Logic
+    vols = [c.get('volume') for c in candles]
+    cvds = [c.get('cvd_pct') for c in candles]
+    liq_ls = [c.get('liq_long') for c in candles]
+    liq_ss = [c.get('liq_short') for c in candles]
     
-    sum_liq_L = sum((c.get('liq_long') or 0) for c in candles)
-    sum_liq_S = sum((c.get('liq_short') or 0) for c in candles)
-    
-    # Avoid zero division
-    liq_ratio = 999.0
-    if sum_liq_S > 0:
-        liq_ratio = round(sum_liq_L / sum_liq_S, 2)
-    elif sum_liq_L > 0:
-        liq_ratio = 999.0 # Dominance
-    else:
-        liq_ratio = 0.0
+    # We rely on local_warnings being initialized later in the function?
+    # No, we need it now. 
+    # BUT existing code initializes output near return. 
+    # Logic flow:
+    # 1. Init warnings list at start of function.
+    local_warnings = []
 
-    start_px = c_first.get('open', 0) or 0
-    end_px = c_last.get('close', 0) or 0
+    if any(v is None for v in vols):
+        sum_vol = None
+        local_warnings.append("⚠️ Warning: Missing volume in candles")
+    else:
+        sum_vol = sum(vols)
+
+    if any(c is None for c in cvds):
+        sum_cvd = None
+        local_warnings.append("⚠️ Warning: Missing cvd_pct in candles")
+    else:
+        sum_cvd = sum(cvds)
+
+    if any(l is None for l in liq_ls):
+        sum_liq_L = None
+        local_warnings.append("⚠️ Warning: Missing liq_long in candles -> sum_liq_long=None, liq_ratio cannot be computed")
+    else:
+        sum_liq_L = sum(abs(l) for l in liq_ls)
+
+    if any(s is None for s in liq_ss):
+        sum_liq_S = None
+        local_warnings.append("⚠️ Warning: Missing liq_short in candles -> sum_liq_short=None, liq_ratio cannot be computed")
+    else:
+        sum_liq_S = sum(abs(s) for s in liq_ss)
     
-    # Body Range Pct
-    # Need global High/Low of the segment
-    seg_high = max((c.get('high') or 0) for c in candles)
-    seg_low = min((c.get('low') or 99999999) for c in candles)
-    seg_range = seg_high - seg_low
+    start_px = c_first.get('open')
+    end_px = c_last.get('close')
     
-    body_rng_pct = 0.0
-    if seg_range > 0:
-        body_rng_pct = abs(end_px - start_px) / seg_range * 100
+    body_rng_pct = None
+
+    if start_px is None or end_px is None:
+        local_warnings.append("⚠️ Warning: Missing open/close -> start/end_price=None, body_range_pct cannot be computed")
+    else:
+        # Body Range Pct
+        # Need global High/Low of the segment
+        highs = [c.get("high") for c in candles if c.get("high") is not None]
+        lows  = [c.get("low")  for c in candles if c.get("low")  is not None]
+
+        if not highs or not lows:
+             local_warnings.append("⚠️ Warning: Missing high/low in candles -> body_range_pct cannot be computed")
+             seg_high = None
+             seg_low = None
+        else:
+             seg_high = max(highs)
+             seg_low  = min(lows)
         
-    avg_upper = sum((c.get('upper_tail_pct') or 0) for c in candles) / len(candles)
-    avg_lower = sum((c.get('lower_tail_pct') or 0) for c in candles) / len(candles)
+        seg_range = (seg_high - seg_low) if (seg_high is not None and seg_low is not None) else 0
+        
+        body_rng_pct = 0.0 # Default if range is 0 but data exists
+        if seg_range > 0:
+            body_rng_pct = abs(end_px - start_px) / seg_range * 100.0
+        elif seg_high is None: # If missing data, explicit None
+            body_rng_pct = None
+        
+    # Tail logic (already has local_warnings usage)
+    # Ensure we don't overwrite local_warnings from line 15
+    # Remove 'local_warnings = []' from strict tail logic block if it exists
+    uppers = [c.get('upper_tail_pct') for c in candles]
+    lowers = [c.get('lower_tail_pct') for c in candles]
     
-    net_oi = ((c_last.get('oi_close') or 0) - (c_first.get('oi_open') or 0))
+    # local_warnings already init at top
+    
+    if any(u is None for u in uppers):
+        avg_upper = None
+        local_warnings.append("⚠️ Warning: Missing upper_tail_pct in candles, avg set to None")
+    else:
+        avg_upper = sum(uppers) / len(candles)
+
+    if any(l is None for l in lowers):
+        avg_lower = None
+        local_warnings.append("⚠️ Warning: Missing lower_tail_pct in candles, avg set to None")
+    else:
+        avg_lower = sum(lowers) / len(candles)
+    
+    # Strict Net OI Logic
+    oi_close = c_last.get("oi_close")
+    oi_open  = c_first.get("oi_open")
+    net_oi = None if (oi_close is None or oi_open is None) else (oi_close - oi_open)
+
+    # Liquidity Dominance (Strict Logic - Deterministic)
+    liq_ratio = None
+    if sum_liq_L is not None and sum_liq_S is not None:
+        if sum_liq_S > 0:
+            liq_ratio = round(sum_liq_L / sum_liq_S, 2)
+        elif sum_liq_L > 0:
+            liq_ratio = 999.0
+        else:
+            liq_ratio = 1.0
 
     stats = {
         "candles_count": len(candles),
         "sum_volume": sum_vol,
-        "sum_cvd_pct": round(sum_cvd, 2),
+        "sum_cvd_pct": round(sum_cvd, 2) if sum_cvd is not None else None,
         "sum_liq_long": sum_liq_L,
         "sum_liq_short": sum_liq_S,
         "net_oi_change": net_oi,
         "start_price": start_px,
         "end_price": end_px,
-        "avg_upper_tail_pct": round(avg_upper, 2),
-        "avg_lower_tail_pct": round(avg_lower, 2),
+        "avg_upper_tail_pct": round(avg_upper, 2) if avg_upper is not None else None,
+        "avg_lower_tail_pct": round(avg_lower, 2) if avg_lower is not None else None,
         "liq_dominance_ratio": liq_ratio,
-        "body_range_pct": round(body_rng_pct, 2)
+        "body_range_pct": round(body_rng_pct, 2) if body_rng_pct is not None else None,
+        "_warnings": local_warnings
     }
-    return stats
+    return stats, local_warnings
 
 # --- 4. DATA SAVING LOGIC (Step 1.2) ---
 
@@ -81,10 +150,15 @@ def save_to_candles(supabase, candles_list):
         # IF current app uses `update_candle_db` by ID, it implies IDs are fetched first.
         # Here we are inserting NEW data.
         
+        # Safe raw_data truncation
+        raw_val = c.get('raw_data')
+        raw_truncated = raw_val[:1000] if (raw_val and isinstance(raw_val, str)) else None
+
         # Prepare row consistent with DB schema
         row = {
             "ts": c.get('ts'),
-            "symbol": c.get('symbol_clean'),
+            "symbol_clean": c.get('symbol_clean'), # FIX: key matches DB column
+            "raw_symbol": c.get('raw_symbol'),     # FIX: added column
             "exchange": c.get('exchange'),
             "tf": c.get('tf'),
             "open": c.get('open'),
@@ -92,11 +166,63 @@ def save_to_candles(supabase, candles_list):
             "low": c.get('low'),
             "close": c.get('close'),
             "volume": c.get('volume'),
-            "note": c.get('x_ray'), # We save X-Ray text into 'note' or separate column? 
-                                    # App uses 'x_ray' column.
-            "x_ray": c.get('x_ray'), # Ensure we save 'x_ray' content
-            "raw_data": c.get('raw_data')[:1000] # Truncate if too long?
-            # Add other metrics if columns exist in DB
+            "buy_volume": c.get('buy_volume'),
+            "sell_volume": c.get('sell_volume'),
+            "abv_delta": c.get('abv_delta'),
+            "abv_ratio": c.get('abv_ratio'),
+            "buy_trades": c.get('buy_trades'),
+            "sell_trades": c.get('sell_trades'),
+            "trades_delta": c.get('trades_delta'),
+            "trades_ratio": c.get('trades_ratio'),
+            "oi_open": c.get('oi_open'),
+            "oi_high": c.get('oi_high'),
+            "oi_low": c.get('oi_low'),
+            "oi_close": c.get('oi_close'),
+            "liq_long": c.get('liq_long'),
+            "liq_short": c.get('liq_short'),
+            "change_abs": c.get('change_abs'),
+            "change_pct": c.get('change_pct'),
+            "amplitude_abs": c.get('amplitude_abs'),
+            "amplitude_pct": c.get('amplitude_pct'),
+            "cvd_pct": c.get('cvd_pct'),
+            "cvd_sign": c.get('cvd_sign'),
+            "cvd_small": c.get('cvd_small'),
+            "dtrades_pct": c.get('dtrades_pct'),
+            "ratio_stable": c.get('ratio_stable'),
+            "avg_trade_buy": c.get('avg_trade_buy'),
+            "avg_trade_sell": c.get('avg_trade_sell'),
+            "tilt_pct": c.get('tilt_pct'),
+            "implied_price": c.get('implied_price'),
+            "dpx": c.get('dpx'),
+            "price_vs_delta": c.get('price_vs_delta'),
+            "doi_pct": c.get('doi_pct'),
+            "oipos": c.get('oipos'),
+            "oi_path": c.get('oi_path'),
+            "oe": c.get('oe'),
+            "liq_share_pct": c.get('liq_share_pct'),
+            "limb_pct": c.get('limb_pct'),
+            "liq_squeeze": c.get('liq_squeeze'),
+            "porog_final": c.get('porog_final'),
+            "r": c.get('r'),
+            "epsilon": c.get('epsilon'),
+            "oi_in_sens": c.get('oi_in_sens'),
+            "t_set_pct": c.get('t_set_pct'),
+            "t_counter_pct": c.get('t_counter_pct'),
+            "t_unload_pct": c.get('t_unload_pct'),
+            "oi_set": c.get('oi_set'),
+            "oi_counter": c.get('oi_counter'),
+            "oi_unload": c.get('oi_unload'),
+            "r_strength": c.get('r_strength'),
+            "dominant_reject": c.get('dominant_reject'),
+            "price_sign": c.get('price_sign'),
+            "range": c.get('range'),
+            "range_pct": c.get('range_pct'),
+            "body_pct": c.get('body_pct'),
+            "clv_pct": c.get('clv_pct'),
+            "upper_tail_pct": c.get('upper_tail_pct'),
+            "lower_tail_pct": c.get('lower_tail_pct'),
+            "x_ray": c.get('x_ray'), 
+            "raw_data": raw_truncated
         }
         
         # Filter None
@@ -105,19 +231,16 @@ def save_to_candles(supabase, candles_list):
 
     count = 0
     if data_for_upsert:
-        # Upsert: on_conflict=["ts", "symbol", "tf", "exchange"]
-        # Need to know exact constraint name or columns.
+        # Upsert: on_conflict adjusted to match actual columns
         try:
-            # Try plain upsert using columns that define uniqueness
             res = supabase.table("candles").upsert(
                 data_for_upsert, 
-                on_conflict="ts, symbol, tf, exchange" 
+                on_conflict="ts,symbol_clean,tf,exchange"
             ).execute()
             count = len(res.data) if res.data else 0
         except Exception as e:
-            # Fallback if constraint differs or error
-            print(f"Save Error: {e}")
-            return 0
+            print(f"Candle Save Error: {e}")
+            raise e
             
     return count
 
@@ -199,7 +322,13 @@ def parse_batch_with_labels(full_text, config=None):
         s_start, s_end = sm.start(), sm.end()
         
         # Check if matched text is part of a valid label range (e.g. "Medium" inside "Medium\nUp")
-        is_covered = any(v_start <= s_start and s_end <= v_end for v_start, v_end in valid_ranges)
+        # Relaxed check: if suspect overlaps ANY valid range, it's covered.
+        is_covered = False
+        for v_start, v_end in valid_ranges:
+            # Overlap logic: start < end and end > start
+            if s_start < v_end and s_end > v_start:
+                is_covered = True
+                break
         
         if not is_covered:
             warnings.append(f"⚠️ POTENTIAL ERROR: Found incomplete label '{sm.group(1)}' at char {s_start}. Expected format: 'Strength Direction' (e.g. 'Strong Up'). This segment might be parsed incorrectly.")
@@ -210,15 +339,19 @@ def parse_batch_with_labels(full_text, config=None):
     for match in labels_iter:
         label_start = match.start()
         label_end = match.end()
-        y_size = match.group(1).title() 
-        y_dir = match.group(2).upper()  
+        
+        # Strength (Group 1) and Direction (Group 2)
+        strength = match.group(1).title() # e.g. "Strong"
+        direction = match.group(2).upper() # e.g. "UP"
         
         chunk_text = full_text[current_pos:label_start].strip()
         
         if not chunk_text:
-            warnings.append(f"Label {y_size} {y_dir} at char {label_start} has no preceding candles.")
+            warnings.append(f"Label {strength} {direction} at char {label_start} has no preceding candles.")
         else:
-            raw_candles = re.split(r'(?=(?:Binance|Bybit|OKX)\s+·)', chunk_text, flags=re.IGNORECASE)
+            # Corrected Split Regex (by Timestamp)
+            # Support single-digit hour (e.g. 0:00:00, 4:00:00)
+            raw_candles = re.split(r'(?m)^(?=\d{2}\.\d{2}\.\d{4}\s+\d{1,2}:\d{2}:\d{2})', chunk_text)
             raw_candles = [c.strip() for c in raw_candles if c.strip()]
             
             parsed_segment_candles = []
@@ -231,24 +364,35 @@ def parse_batch_with_labels(full_text, config=None):
                 
                 full = calculate_metrics(base, config)
                 # Need to generate X-Ray for consistency if saving to 'candles'
-                from parsing_engine import generate_full_report # Local import to avoid circular defaults
-                # Check for volume
-                if full.get('buy_volume', 0) != 0:
-                     full['x_ray'] = generate_full_report(full)
+                # Attempt to generate X-Ray for ALL candles (safe wrapper)
+                try:
+                    full['x_ray'] = generate_full_report(full) if full else None
+                except Exception as e:
+                    # Log warning but don't crash
+                    print(f"Warning: Failed to generate x_ray: {e}") 
+                    full['x_ray'] = None
                 
                 parsed_segment_candles.append(full)
             
             if parsed_segment_candles:
-                parsed_segment_candles.sort(key=lambda x: x.get('ts', ''))
+                # Safe sort: Handle None if strict parsing failed to avoid crash
+                parsed_segment_candles.sort(key=lambda x: (x.get('ts') or ''))
                 all_candles.extend(parsed_segment_candles)
-                stats = calculate_stats_agg(parsed_segment_candles)
                 
+                # Use Tuple Return (Variant A)
+                stats, stats_warnings = calculate_stats_agg(parsed_segment_candles)
+                
+                # Extend main warnings cleanly
+                if stats_warnings:
+                    warnings.extend(stats_warnings)
+
                 first = parsed_segment_candles[0]
                 meta = {
-                    "symbol": first.get('symbol_clean', 'Unknown') + " Perp", 
-                    "tf": first.get('tf', '4h'),
-                    "exchange": first.get('exchange', 'Binance'),
-                    "total_candles": len(parsed_segment_candles)
+                    "symbol": first.get('symbol_clean'), 
+                    "tf": first.get('tf'),
+                    "exchange": first.get('exchange'),
+                    "total_candles": len(parsed_segment_candles),
+                    "impulse_split_index": len(parsed_segment_candles) - 1
                 }
                 
                 segment_obj = {
@@ -258,13 +402,13 @@ def parse_batch_with_labels(full_text, config=None):
                         "DATA": parsed_segment_candles
                     },
                     "IMPULSE": {
-                        "y_dir": y_dir,
-                        "y_size": y_size
+                        "y_dir": direction,
+                        "y_size": strength
                     }
                 }
                 segments.append(segment_obj)
             else:
-                warnings.append(f"Label {y_size} {y_dir} had valid text but no valid candles parsed.")
+                warnings.append(f"Label {strength} {direction} had valid text but no valid candles parsed.")
         
         current_pos = label_end
         
@@ -279,20 +423,15 @@ def parse_batch_with_labels(full_text, config=None):
 
 def save_batch_transactionally(supabase, segments_list, candles_list):
     """
-    Transactions Logic (Python-side Best Effort).
-    1. Insert Segments -> Get IDs.
-    2. Upsert Candles.
-    3. If Candles fail -> Delete Segments (Rollback).
-    
-    Returns: (segments_count, candles_count) or raises Exception.
+    Supabase handles transactions server-side if RLS is configured.
+    Just do the inserts without manual rollback.
     """
-    # 1. Save Segments first (since they are new entries, easier to rollback delete)
-    seg_ids = []
-    seg_count = 0
-    
-    if segments_list:
-        try:
-            # Manually constructing rows as save_to_segments doesn't return IDs
+    try:
+        seg_count = 0
+        candles_count = 0
+        
+        # 1. Save Segments
+        if segments_list:
             print("Saving segments...")
             rows = []
             for s in segments_list:
@@ -300,44 +439,61 @@ def save_batch_transactionally(supabase, segments_list, candles_list):
                 imp = s.get('IMPULSE', {})
                 ctx = s.get('CONTEXT', {})
                 candles = ctx.get('DATA', [])
-                data_blob = {"META": meta, "CONTEXT": ctx}
-                t_start = candles[0].get('ts') if candles else None
-                t_end = candles[-1].get('ts') if candles else None
                 
+                # Filter logic for JSON optimization
+                filtered_candles = []
+                keep_keys = {
+                    "ts", "exchange", "symbol", "tf", 
+                    "raw_symbol", "symbol_clean", "missing_fields",
+                    "open", "high", "low", "close", 
+                    "volume", "buy_volume", "sell_volume", "buy_trades", "sell_trades", 
+                    "oi_open", "oi_high", "oi_low", "oi_close", "liq_long", "liq_short", 
+                    "range", "body_pct", "clv_pct", "upper_tail_pct", "lower_tail_pct", 
+                    "price_sign", "dominant_reject", "cvd_pct", "cvd_sign", "cvd_small", 
+                    "dpx", "price_vs_delta", "dtrades_pct", "ratio_stable", "tilt_pct", 
+                    "doi_pct", "oi_in_sens", "oi_set", "oi_counter", "oi_unload", "oipos", 
+                    "oi_path", "oe", "liq_share_pct", "limb_pct", "liq_squeeze", 
+                    "range_pct", "implied_price", "avg_trade_buy", "avg_trade_sell"
+                }
+                
+                for c in candles:
+                    filtered_c = {k: v for k, v in c.items() if k in keep_keys}
+                    filtered_candles.append(filtered_c)
+
+                # Enforce key order: STATS first, then DATA
+                filtered_ctx = {
+                    "STATS": ctx.get("STATS", {}),
+                    "DATA": filtered_candles
+                }
+
                 rows.append({
-                    "exchange": meta.get('exchange'),
-                    "symbol": meta.get('symbol'),
-                    "tf": meta.get('tf'),
-                    "ts_start": t_start,
-                    "ts_end": t_end,
+                    "exchange": meta.get('exchange', 'Binance'),
+                    "symbol": meta.get('symbol', 'Unknown'),
+                    "tf": meta.get('tf', '4h'),
+                    "ts_start": candles[0].get('ts') if candles else None,
+                    "ts_end": candles[-1].get('ts') if candles else None,
                     "y_dir": imp.get('y_dir'),
                     "y_size": imp.get('y_size'),
-                    "data": data_blob
+                    "data": {
+                        "META": meta, 
+                        "CONTEXT": filtered_ctx,
+                        "IMPULSE": imp
+                    }
                 })
             
-            if rows:
-                res = supabase.table("segments").insert(rows).select("id").execute()
-                if res.data:
-                    seg_ids = [r['id'] for r in res.data]
-                    seg_count = len(seg_ids)
-            
-        except Exception as e:
-            print(f"Transaction Aborted: Segments Save Failed: {e}")
-            raise e # Abort immediately
-
-    # 2. Save Candles
-    if candles_list:
-        try:
+            res_seg = supabase.table("segments").insert(rows).execute()
+            seg_count = len(res_seg.data) if res_seg.data else 0
+            print(f"✅ Saved {seg_count} segments")
+        
+        # 2. Save Candles
+        if candles_list:
             print("Saving candles...")
-            save_to_candles(supabase, candles_list) 
-        except Exception as e:
-             print(f"Candle Save Error: {e}")
-             if seg_ids:
-                 print(f"ROLLBACK: Deleting {len(seg_ids)} segments...")
-                 try:
-                     supabase.table("segments").delete().in_("id", seg_ids).execute()
-                 except Exception as rb_e:
-                     print(f"Rollback Failed: {rb_e}")
-             raise e
-    
-    return seg_count, len(candles_list)
+            candles_count = save_to_candles(supabase, candles_list)
+            print(f"✅ Saved {candles_count} candles")
+        
+        return seg_count, candles_count
+        
+    except Exception as e:
+        print(f"❌ Save Error: {e}")
+        # Supabase rollback happens automatically
+        raise e
