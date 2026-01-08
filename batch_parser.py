@@ -140,16 +140,22 @@ def save_to_candles(supabase, candles_list):
     """
     if not candles_list: return 0
     
+    seen_keys = set()
     data_for_upsert = []
     
     for c in candles_list:
-        # Generate composite composite ID for exact deduplication
-        # (Assuming app logic uses same ID generation, usually done via hash or composite unique index)
-        # Note: If Supabase table has AUTO-ID, we might need a unique constraint columns.
-        # User's 'candles' table typically uses `ts` + `symbol` + `timeframe` + `exchange` as unique
-        # We will let Supabase handle conflict if Unique constraint exists, or just insert.
-        # IF current app uses `update_candle_db` by ID, it implies IDs are fetched first.
-        # Here we are inserting NEW data.
+        # Generate composite key for local deduplication
+        # (Must match the UNIQUE constraint in DB: ts, symbol_clean, tf, exchange)
+        clean_s = c.get('symbol_clean')
+        ts_val = c.get('ts')
+        tf_val = c.get('tf')
+        exch_val = c.get('exchange')
+        
+        unique_key = (ts_val, clean_s, tf_val, exch_val)
+        
+        if unique_key in seen_keys:
+            continue
+        seen_keys.add(unique_key)
         
         # Safe raw_data truncation
         raw_val = c.get('raw_data')
@@ -157,11 +163,11 @@ def save_to_candles(supabase, candles_list):
 
         # Prepare row consistent with DB schema
         row = {
-            "ts": c.get('ts'),
-            "symbol_clean": c.get('symbol_clean'), # FIX: key matches DB column
+            "ts": ts_val,
+            "symbol_clean": clean_s, # FIX: key matches DB column
             "raw_symbol": c.get('raw_symbol'),     # FIX: added column
-            "exchange": c.get('exchange'),
-            "tf": c.get('tf'),
+            "exchange": exch_val,
+            "tf": tf_val,
             "open": c.get('open'),
             "high": c.get('high'),
             "low": c.get('low'),
