@@ -107,26 +107,27 @@ def calculate_stats_agg(candles):
     liq_ratio = None
     if sum_liq_L is not None and sum_liq_S is not None:
         if sum_liq_S > 0:
-            liq_ratio = round(sum_liq_L / sum_liq_S, 2)
-        elif sum_liq_L > 0:
-            liq_ratio = 999.0
-        else:
+            liq_ratio = sum_liq_L / sum_liq_S
+        elif sum_liq_L == 0:  # and sum_liq_S == 0
             liq_ratio = 1.0
+        else:
+            # sum_liq_S == 0 but sum_liq_L > 0
+            liq_ratio = None
+            local_warnings.append("⚠️ Warning: liq_dominance_ratio undefined (sum_liq_S=0, sum_liq_L>0)")
 
     stats = {
         "candles_count": len(candles),
         "sum_volume": sum_vol,
-        "sum_cvd_pct": round(sum_cvd, 2) if sum_cvd is not None else None,
+        "sum_cvd_pct": sum_cvd,
         "sum_liq_long": sum_liq_L,
         "sum_liq_short": sum_liq_S,
         "net_oi_change": net_oi,
         "start_price": start_px,
         "end_price": end_px,
-        "avg_upper_tail_pct": round(avg_upper, 2) if avg_upper is not None else None,
-        "avg_lower_tail_pct": round(avg_lower, 2) if avg_lower is not None else None,
+        "avg_upper_tail_pct": avg_upper,
+        "avg_lower_tail_pct": avg_lower,
         "liq_dominance_ratio": liq_ratio,
-        "body_range_pct": round(body_rng_pct, 2) if body_rng_pct is not None else None,
-        "_warnings": local_warnings
+        "body_range_pct": body_rng_pct
     }
     return stats, local_warnings
 
@@ -443,8 +444,7 @@ def save_batch_transactionally(supabase, segments_list, candles_list):
                 # Filter logic for JSON optimization
                 filtered_candles = []
                 keep_keys = {
-                    "ts", "exchange", "symbol", "tf", 
-                    "raw_symbol", "symbol_clean", "missing_fields",
+                    "ts", "missing_fields",
                     "open", "high", "low", "close", 
                     "volume", "buy_volume", "sell_volume", "buy_trades", "sell_trades", 
                     "oi_open", "oi_high", "oi_low", "oi_close", "liq_long", "liq_short", 
@@ -466,18 +466,26 @@ def save_batch_transactionally(supabase, segments_list, candles_list):
                     "DATA": filtered_candles
                 }
 
+                # Validation: Require Metadata
+                m_exch = meta.get('exchange')
+                m_sym  = meta.get('symbol')
+                m_tf   = meta.get('tf')
+                
+                if not m_exch or not m_sym or not m_tf:
+                    print(f"⚠️ Skipping segment with missing meta: {meta}")
+                    continue
+
                 rows.append({
-                    "exchange": meta.get('exchange', 'Binance'),
-                    "symbol": meta.get('symbol', 'Unknown'),
-                    "tf": meta.get('tf', '4h'),
+                    "exchange": m_exch,
+                    "symbol": m_sym,
+                    "tf": m_tf,
                     "ts_start": candles[0].get('ts') if candles else None,
                     "ts_end": candles[-1].get('ts') if candles else None,
                     "y_dir": imp.get('y_dir'),
                     "y_size": imp.get('y_size'),
                     "data": {
                         "META": meta, 
-                        "CONTEXT": filtered_ctx,
-                        "IMPULSE": imp
+                        "CONTEXT": filtered_ctx
                     }
                 })
             
