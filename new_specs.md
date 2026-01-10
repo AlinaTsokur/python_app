@@ -42,6 +42,11 @@
    - Зафиксировать версию numpy (requirements.txt / poetry.lock), т.к. квантильный метод должен быть воспроизводим.
    - Метод квантилей фиксируется как method='linear' (см. PATCH-04 в Этапе 2 и Этапе 4).
 
+[PATCH-05] RANK_BINS_MIN_SAMPLES (approved)
+- Дата: 2026-01-10
+- Модуль: Stage 3 (3_build_bins.py)
+- Описание: Rank-поля (vol_rank, doi_rank, liq_rank) требуют минимум 50 сэмплов для расчета квантилей. Если n_samples < 50, bins[field] = None. Это предотвращает фрагментацию паттернов из-за нестабильных rank-бинов.
+- Статус: approved
 
 
 Строгие ограничения: Никакого эвристического инжиниринга признаков сверх ТЗ.
@@ -1435,5 +1440,38 @@ C) 1 пример входа/выхода online
 Один пример свечи + пример ответа детектора:
 { "direction":"UP", "confidence":72, "eta":"MID", "matched_data":[...], "matched_stats":[...] 
 
+---
 
+## [PATCH] ARTIFACT_KEY NAMING CONVENTION (approved)
 
+### Формат ключа артефакта
+
+Все артефакты в таблице `training_artifacts` используют ключ формата:
+```
+{type}_{symbol}_{tf}_{exchange}
+```
+
+**Примеры:**
+- `bins_ETH_1D_Binance`
+- `rules_ETH_4h_Binance`
+- `stats_BTC_1D_Binance`
+
+### Правила
+
+1. Ключ формируется **автоматически кодом**, не хардкодится в config.json
+2. Каждая комбинация (symbol, tf, exchange) = отдельный артефакт
+
+### Версионирование
+
+Primary Key таблицы: `(artifact_key, version)`
+
+Это позволяет хранить **историю версий** одного артефакта:
+- `bins_ETH_1D_Binance` + `1.0.0`
+- `bins_ETH_1D_Binance` + `1.0.1`
+
+При загрузке артефакта для online-детектора (берём последнюю версию):
+```sql
+SELECT * FROM training_artifacts 
+WHERE artifact_key = 'bins_ETH_1D_Binance' 
+ORDER BY version DESC LIMIT 1
+```
