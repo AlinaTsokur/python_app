@@ -714,7 +714,12 @@ import importlib
 import batch_parser
 importlib.reload(batch_parser) # Force reload to apply fixes immediately
 
-TABS = ["Отчеты", "Свечи", "Дивер", "Уровни", "Лаборатория"]
+# Dynamic Import of Offline modules
+from offline import stage1_loader, stage2_features
+importlib.reload(stage1_loader)
+importlib.reload(stage2_features)
+
+TABS = ["Отчеты", "Свечи", "Дивер", "Уровни", "Лаборатория", "Обучение"]
 
 # 1. Get current tab from URL or Session State
 query_params = st.query_params
@@ -741,9 +746,53 @@ selected_tab = st.radio(
     on_change=on_tab_change
 )
 
+# ... (Previous Tabs Code) ...
 
-
-# tab1, tab2, tab3 = st.tabs(["Отчеты", "Свечи", "Дивер"]) - REMOVED
+if selected_tab == "Обучение":
+    st.header("🏁 Центр Обучения Модели (V2.1)")
+    
+    col_cfg, col_stat = st.columns([1, 2])
+    
+    with col_cfg:
+        st.subheader("1. Параметры")
+        tr_symbol = st.selectbox("Тикер", ["ETH", "BTC", "SOL", "BNB"], index=0)
+        tr_tf = st.selectbox("Таймфрейм", ["1D", "4h", "1h", "15m"], index=0)
+        tr_exchange = st.text_input("Биржа", "Binance")
+        
+        start_btn = st.button("🚀 ЗАПУСТИТЬ ОБУЧЕНИЕ", type="primary", use_container_width=True)
+        
+    with col_stat:
+        st.subheader("2. Прогресс")
+        
+        if start_btn:
+            status = st.status("Запуск конвейера...", expanded=True)
+            
+            # PHASE 1: LOADING
+            status.write("📥 Шаг 1: Загрузка данных (Offline Pooling)...")
+            success1, msg1, count1 = stage1_loader.run_pipeline(tr_symbol, tr_tf, tr_exchange)
+            
+            if not success1:
+                status.update(label="❌ Ошибка на этапе загрузки!", state="error")
+                st.error(msg1)
+            else:
+                status.write(f"✅ Данные загружены: {msg1}")
+                
+                # PHASE 2: FEATURES
+                status.write("🧠 Шаг 2: Генерация признаков (Simulation)...")
+                try:
+                    success2, msg2, count2 = stage2_features.run_simulation(tr_symbol, tr_tf, tr_exchange)
+                    
+                    if not success2:
+                        status.update(label="❌ Ошибка генерации признаков!", state="error")
+                        st.error(msg2)
+                    else:
+                         status.write(f"✅ Признаки созданы: {msg2}")
+                         status.update(label="🎉 Обучение (Симуляция) завершено успешно!", state="complete")
+                         st.balloons()
+                         
+                except Exception as e:
+                     status.update(label="❌ Критическая ошибка (Stage 2)", state="error")
+                     st.error(str(e))
 
 if selected_tab == "Отчеты":
     # TAB 1 CONTENT

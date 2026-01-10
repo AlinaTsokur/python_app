@@ -1,3 +1,19 @@
-streamlit
-pandas
-supabase
+# --- CORE MATHEMATICS & DATA (Strict Versions) ---
+# Critical for method='linear' in quantiles
+numpy==2.4.1
+pandas==2.2.2
+
+# --- CALIBRATION ONLY ---
+# Critical for IsotonicRegression behavior
+scikit-learn==1.8.0
+
+# --- INFRASTRUCTURE ---
+supabase==2.5.0
+python-dotenv==1.0.1
+
+# --- UI LAYER (Not used in Offline Core) ---
+streamlit>=1.41.0
+plotly==5.22.0
+
+# --- TESTING ---
+pytest==8.2.2

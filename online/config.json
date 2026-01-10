@@ -1,0 +1,67 @@
+{
+    "buffer_size": 30,
+    "max_pattern_length": 15,
+    "core_state_fields": [
+        "div_type",
+        "oi_flags",
+        "cvd_pct_bin",
+        "clv_bin"
+    ],
+    "stats_features": [
+        "sum_cvd_pct",
+        "net_oi_change",
+        "liq_dominance_ratio",
+        "sum_liq_long",
+        "sum_liq_short",
+        "avg_upper_tail_pct",
+        "avg_lower_tail_pct",
+        "body_range_pct"
+    ],
+    "max_conditions_stats": 3,
+    "min_support_rule": "max(3, ceil(0.02*N))",
+    "prior_strength": 10,
+    "weight_fn": "1 + ln(support)",
+    "aggregate": "avg_logit",
+    "threshold_range": [
+        0.50,
+        0.55,
+        0.60,
+        0.65,
+        0.70,
+        0.75
+    ],
+    "alpha_range": [
+        0.0,
+        0.1,
+        0.2,
+        0.3,
+        0.4,
+        0.5
+    ],
+    "alpha_default": 0.3,
+    "max_flicker_rate": 0.3,
+    "min_edge_threshold_rule": "max(0.03, 1/sqrt(N))",
+    "objective": "F1",
+    "artifact_paths": {
+        "bins": "bins_v2_1",
+        "bins_stats": "bins_stats_v2_1",
+        "rules_data": "rules_data_v2_1",
+        "rules_stats": "rules_stats_v2_1",
+        "calibration": "calibration_v2_1"
+    },
+    "tti_buckets": {
+        "NEAR": [
+            0,
+            1
+        ],
+        "MID": [
+            2,
+            3,
+            4
+        ],
+        "EARLY": [
+            5,
+            1000000
+        ]
+    }
+}

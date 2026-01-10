@@ -1,0 +1,14 @@
+{
+  "stats": {
+    "NO_DATA_JSON": 0,
+    "BAD_SCHEMA": 0,
+    "BAD_META": 0,
+    "NO_CANDLES": 0,
+    "DROP_SEGMENT_TOO_LONG": 0,
+    "DROP_CORE_MISSING": 0,
+    "DROP_NAN_PRESENT": 0,
+    "DROP_LABEL_MISSING": 0,
+    "DROP_LABEL_INVALID": 0
+  },
+  "details": []
+}
