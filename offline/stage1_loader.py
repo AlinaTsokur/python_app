@@ -24,6 +24,10 @@ CORE_FIELDS_CHECK = [
     "oi_in_sens",
 ]
 
+# Valid domains for CORE_STATE fields
+VALID_SIGN = {-1, 0, 1}
+VALID_BOOL = {0, 1, True, False}
+
 # Valid y_size labels (case-insensitive) + normalization to ТЗ canon {S,M,L}
 Y_SIZE_MAP = {
     "WEAK": "S",
@@ -85,6 +89,21 @@ def is_valid_segment(seg):
             if field not in c or c.get(field) is None:
                 ts = c.get("ts")
                 return False, f"DROP_CORE_MISSING: {field} at idx {i} ts={ts}"
+        
+        # 1.5) CORE_STATE domain validation
+        # price_sign, cvd_sign must be in {-1, 0, 1}
+        if c.get("price_sign") not in VALID_SIGN:
+            ts = c.get("ts")
+            return False, f"DROP_CORE_INVALID_DOMAIN: price_sign={c.get('price_sign')} at idx {i} ts={ts}"
+        if c.get("cvd_sign") not in VALID_SIGN:
+            ts = c.get("ts")
+            return False, f"DROP_CORE_INVALID_DOMAIN: cvd_sign={c.get('cvd_sign')} at idx {i} ts={ts}"
+        
+        # OI flags must be boolean-like
+        for flag in ["oi_set", "oi_unload", "oi_counter", "oi_in_sens"]:
+            if c.get(flag) not in VALID_BOOL:
+                ts = c.get("ts")
+                return False, f"DROP_CORE_INVALID_DOMAIN: {flag}={c.get(flag)} at idx {i} ts={ts}"
 
     # === PRIORITY 2: NaN checks (per ТЗ) ===
     for i, c in enumerate(candles):
@@ -170,6 +189,7 @@ def run_pipeline(symbol, tf, exchange="Binance", limit=10000):
         "NO_CANDLES": 0,
         "DROP_SEGMENT_TOO_LONG": 0,
         "DROP_CORE_MISSING": 0,
+        "DROP_CORE_INVALID_DOMAIN": 0,
         "DROP_NAN_PRESENT": 0,
         "DROP_LABEL_MISSING": 0,
         "DROP_LABEL_INVALID": 0,
