@@ -450,7 +450,7 @@ def save_batch_transactionally(supabase, segments_list, candles_list):
                 # Filter logic for JSON optimization
                 filtered_candles = []
                 keep_keys = {
-                    "ts", "missing_fields",
+                    "ts", "missing_fields", "tf", "exchange", "symbol_clean",
                     "open", "high", "low", "close", 
                     "volume", "buy_volume", "sell_volume", "buy_trades", "sell_trades", 
                     "oi_open", "oi_high", "oi_low", "oi_close", "liq_long", "liq_short", 
