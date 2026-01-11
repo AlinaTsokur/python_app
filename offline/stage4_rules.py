@@ -79,6 +79,21 @@ def load_bins(symbol, tf, exchange):
     return data, None
 
 
+def load_clean_data(symbol, tf, exchange):
+    """Load clean data from Stage 1 output (for segment metadata: ts_start, ts_end)."""
+    clean_symbol = symbol.replace("/", "").replace(":", "")
+    clean_tf = tf.replace("/", "")
+    clean_ex = exchange.replace("/", "")
+    filepath = Path(f"offline/data/{clean_symbol}_{clean_tf}_{clean_ex}_clean.json")
+    
+    if not filepath.exists():
+        return None, f"File not found: {filepath}"
+    
+    with open(filepath, "r") as f:
+        data = json.load(f)
+    return data, None
+
+
 def assign_bin(value, thresholds):
     """Assign Q1-Q5 based on quantile thresholds."""
     # Robust handling: convert to float, handle None/NaN/strings/numpy
@@ -301,16 +316,27 @@ def run_mining(symbol, tf, exchange="Binance"):
     
     # 3. Tokenize all steps
     sequences = []
-    setup_ids = []
+    setup_base_ids = []  # Original IDs for JOIN with segments table
     y_dirs = []
-    # Fix B: Separate counters for accurate logging
+    # Counters for logging
     skipped_y_dir = 0
     skipped_tokenization = 0
-    # Track seen IDs for guaranteed uniqueness
-    seen_ids = {}
+    skipped_no_id = 0
+    # Track seen IDs for uniqueness check
+    seen_ids = set()
     
     for idx, seg in enumerate(segments):
-        # Fix #4: Validate y_dir - don't use default
+        # Require segment id for JOIN with segments table
+        base_id = seg.get("id")
+        if not base_id:
+            skipped_no_id += 1
+            continue
+        
+        # Strict uniqueness check - fail on duplicates
+        if base_id in seen_ids:
+            return False, f"DUPLICATE_ID: segment id '{base_id}' appears multiple times. IDs must be unique."
+        
+        # Validate y_dir - don't use default
         y_dir = seg.get("y_dir")
         if y_dir not in ("UP", "DOWN"):
             skipped_y_dir += 1
@@ -322,7 +348,6 @@ def run_mining(symbol, tf, exchange="Binance"):
         for step in seg.get("steps", []):
             token = tokenize_state(step, bins_fields)
             if token is None:
-                # Fix #1: Don't skip step - DROP entire segment to preserve contiguous semantics
                 segment_valid = False
                 break
             seq.append(token)
@@ -333,27 +358,17 @@ def run_mining(symbol, tf, exchange="Binance"):
         
         if seq:  # non-empty
             sequences.append(seq)
-            # Guarantee unique setup_id (prevent support/wins corruption)
-            base_id = seg.get("id") or f"idx_{idx}"
-            if base_id in seen_ids:
-                seen_ids[base_id] += 1
-                seg_id = f"{base_id}__{seen_ids[base_id]}"
-            else:
-                seen_ids[base_id] = 0
-                seg_id = base_id
-            setup_ids.append(seg_id)
+            seen_ids.add(base_id)
+            setup_base_ids.append(base_id)
             y_dirs.append(y_dir)
     
-    # Fix B: Separate log messages
+    # Log skipped segments
+    if skipped_no_id > 0:
+        print(f"[WARN] Skipped {skipped_no_id} segments without id")
     if skipped_y_dir > 0:
         print(f"[WARN] Skipped {skipped_y_dir} segments with invalid y_dir")
     if skipped_tokenization > 0:
         print(f"[WARN] Skipped {skipped_tokenization} segments with tokenization errors")
-    
-    # Report if duplicates were found and fixed
-    renamed_count = sum(c for c in seen_ids.values() if c > 0)
-    if renamed_count > 0:
-        print(f"[INFO] Fixed {renamed_count} duplicate setup_ids")
     
     print(f"[INFO] Tokenized {len(sequences)} sequences.")
     
@@ -376,7 +391,7 @@ def run_mining(symbol, tf, exchange="Binance"):
     
     # 5. Pass 1: Mine patterns
     print("[PASS 1] Mining patterns...")
-    patterns = mine_patterns_apriori(sequences, setup_ids, y_dirs, min_support_abs, MAX_PATTERN_LENGTH)
+    patterns = mine_patterns_apriori(sequences, setup_base_ids, y_dirs, min_support_abs, MAX_PATTERN_LENGTH)
     print(f"[INFO] Found {len(patterns)} patterns with support >= {min_support_abs}")
     
     # 6. Pass 2: Compute edge + filter candidates
@@ -385,6 +400,8 @@ def run_mining(symbol, tf, exchange="Binance"):
     beta_prior = (1 - base_P_UP) * PRIOR_STRENGTH + 1
     
     candidates = []
+    rejected_by_edge = []  # Track rejected patterns for debug
+    
     for pattern, stats in patterns.items():
         support = stats["support"]
         wins_up = stats["wins_up"]
@@ -395,20 +412,26 @@ def run_mining(symbol, tf, exchange="Binance"):
         edge_up = p_up_smooth - base_P_UP
         edge_down = p_down_smooth - (1 - base_P_UP)
         
+        pattern_info = {
+            "pattern": pattern,
+            "support": support,
+            "wins_up": wins_up,
+            "wins_down": support - wins_up,
+            "p_up_smooth": p_up_smooth,
+            "p_down_smooth": p_down_smooth,
+            "edge_up": edge_up,
+            "edge_down": edge_down,
+        }
+        
         if max(edge_up, edge_down) >= min_edge_threshold:
-            candidates.append({
-                "pattern": pattern,
-                "support": support,
-                "wins_up": wins_up,
-                "wins_down": support - wins_up,
-                # Fix E: Store full float, no rounding (determinism)
-                "p_up_smooth": p_up_smooth,
-                "p_down_smooth": p_down_smooth,
-                "edge_up": edge_up,
-                "edge_down": edge_down,
-            })
+            candidates.append(pattern_info)
+        else:
+            pattern_info["reason"] = "edge_below_threshold"
+            pattern_info["reason_ru"] = "Преимущество ниже порога (паттерн недостаточно предсказателен)"
+            pattern_info["threshold"] = min_edge_threshold
+            rejected_by_edge.append(pattern_info)
     
-    print(f"[INFO] {len(candidates)} candidates pass edge threshold.")
+    print(f"[INFO] {len(candidates)} candidates pass edge, {len(rejected_by_edge)} rejected by edge.")
     
     if not candidates:
         print("[WARN] No candidates found!")
@@ -427,35 +450,47 @@ def run_mining(symbol, tf, exchange="Binance"):
         print(f"[INFO] Limiting candidates from {len(candidates)} to {MAX_CANDIDATES_FOR_COVERAGE}")
         candidates = candidates[:MAX_CANDIDATES_FOR_COVERAGE]
     
-    # 8. Build coverage map ONLY for limited candidates
+    # 8. Build coverage map ONLY for candidate_patterns (not rejected - saves memory)
     print("[PASS 2.5] Building coverage map...")
     candidate_patterns = {c["pattern"] for c in candidates}  # O(1) lookup
     coverage_map = {p: set() for p in candidate_patterns}
     
-    for seq, seg_id in zip(sequences, setup_ids):
+    for seq, base_id in zip(sequences, setup_base_ids):  # Use base_id for JOIN with segments
         for start in range(len(seq)):
             for length in range(1, min(MAX_PATTERN_LENGTH, len(seq) - start) + 1):
                 pattern = tuple(seq[start:start + length])
                 if pattern in candidate_patterns:
-                    coverage_map[pattern].add(seg_id)
+                    coverage_map[pattern].add(base_id)
     
     # 9. Pass 3: Greedy selection with coverage (now O(candidates) using prebuilt map)
     print("[PASS 3] Greedy selection with coverage...")
     
     covered_setups = set()
     selected_rules = []
+    rejected_by_coverage = []  # Track patterns rejected due to no new coverage
     
     for c in candidates:
         if len(selected_rules) >= K_rules:
-            break
+            # Remaining candidates are rejected due to K_rules limit
+            c_copy = dict(c)
+            c_copy["reason"] = "k_rules_limit"
+            c_copy["reason_ru"] = "Достигнут лимит правил (уже выбрано максимальное количество)"
+            rejected_by_coverage.append(c_copy)
+            continue
         
         # Use prebuilt coverage_map instead of get_setups_with_pattern()
         setups_with_p = coverage_map.get(c["pattern"], set())
         new_coverage = setups_with_p - covered_setups
         
         if not new_coverage:
+            c_copy = dict(c)
+            c_copy["reason"] = "no_new_coverage"
+            c_copy["reason_ru"] = "Нет нового покрытия (сетапы уже покрыты другими правилами)"
+            c_copy["already_covered_by"] = list(covered_setups & setups_with_p)[:5]  # Sample
+            rejected_by_coverage.append(c_copy)
             continue
         
+        # DON'T mutate c - store coverage separately for debug output
         selected_rules.append(c)
         covered_setups |= setups_with_p
     
@@ -465,12 +500,12 @@ def run_mining(symbol, tf, exchange="Binance"):
         if max(first["edge_up"], first["edge_down"]) >= min_edge_threshold:
             selected_rules.append(first)
     
-    print(f"[INFO] Selected {len(selected_rules)} rules.")
+    print(f"[INFO] Selected {len(selected_rules)} rules, {len(rejected_by_coverage)} rejected by coverage.")
     
     # 8. Pass 4: TTI for selected rules
     print("[PASS 4] Computing TTI histograms...")
     for rule in selected_rules:
-        tti_hist = build_tti_histogram(rule["pattern"], sequences, setup_ids)
+        tti_hist = build_tti_histogram(rule["pattern"], sequences, setup_base_ids)
         rule["tti_probs"] = compute_eta_probs(tti_hist)
         rule["pattern"] = list(rule["pattern"])  # tuple -> list for JSON
         rule["last_state"] = rule["pattern"][-1]
@@ -533,6 +568,167 @@ def run_mining(symbol, tf, exchange="Binance"):
         print(f"[INFO] {msg}")
     else:
         print(f"[WARN] {msg}")
+    
+    # 13. Save debug files (local only, not to Supabase)
+    print("[DEBUG] Saving debug files...")
+    
+    # Limits for scalability
+    MAX_REJECTED_TO_SAVE = 2000  # Limit rejected patterns to save
+    # Note: setups are now just IDs (no limit needed - IDs are lightweight)
+    
+    # Build debug rules (with setups as ID array from coverage_map)
+    rules_debug = []
+    for rule in selected_rules:
+        rule_copy = dict(rule)
+        # Get setups from coverage_map, not from rule object
+        pattern = rule.get("pattern")
+        if isinstance(pattern, list):
+            pattern = tuple(pattern)
+        setups_ids = coverage_map.get(pattern, set())
+        
+        # Store only IDs - dates will be fetched via SQL JOIN with segments table
+        rule_copy["setups"] = sorted(setups_ids)  # Sorted for stable order
+        rules_debug.append(rule_copy)
+    
+    # Build rejected patterns list with setups
+    
+    all_rejected = []
+    
+    # Helper to get setups for accepted pattern (from coverage_map)
+    def get_setups_for_accepted(pattern):
+        """Get setup IDs for accepted pattern (uses coverage_map)."""
+        setups_ids = coverage_map.get(pattern, set())
+        return sorted(setups_ids)  # Sorted for stable order
+    
+    # Helper to get setups for rejected pattern (lazy scan - no coverage_map)
+    def get_setups_for_rejected(pattern):
+        """Get setup IDs via lazy scan (rejected patterns not in coverage_map)."""
+        found_ids = set()  # Use set to avoid duplicates
+        pattern_tuple = tuple(pattern) if isinstance(pattern, list) else pattern
+        
+        for seq, base_id in zip(sequences, setup_base_ids):  # Use base_id for JOIN with segments
+            # Check if pattern is in this sequence
+            for start in range(len(seq)):
+                end = start + len(pattern_tuple)
+                if end <= len(seq) and tuple(seq[start:end]) == pattern_tuple:
+                    found_ids.add(base_id)
+                    break  # One match per sequence is enough
+        return sorted(found_ids)  # Sorted for stable order
+    
+    # Sort rejected_by_edge by support (most frequent first) and limit
+    rejected_by_edge_sorted = sorted(rejected_by_edge, key=lambda x: -x.get("support", 0))
+    rejected_by_edge_limited = rejected_by_edge_sorted[:MAX_REJECTED_TO_SAVE]
+    
+    # Add rejected by edge (with lazy setups lookup)
+    for p in rejected_by_edge_limited:
+        p_copy = dict(p)
+        pattern = p_copy.get("pattern")
+        if isinstance(pattern, tuple):
+            p_copy["pattern"] = list(pattern)
+        p_copy["setups"] = get_setups_for_rejected(pattern)
+        all_rejected.append(p_copy)
+    
+    # Add rejected by coverage (uses coverage_map since these were candidates)
+    for p in rejected_by_coverage:
+        if len(all_rejected) >= MAX_REJECTED_TO_SAVE:
+            break
+        p_copy = dict(p)
+        pattern = p_copy.get("pattern")
+        if isinstance(pattern, tuple):
+            p_copy["pattern"] = list(pattern)
+        p_copy["setups"] = get_setups_for_accepted(pattern)
+        all_rejected.append(p_copy)
+    
+    print(f"[INFO] Prepared {len(all_rejected)} rejected patterns for export (limit: {MAX_REJECTED_TO_SAVE})")
+    
+    # 14. Save debug data to Supabase tables (instead of local JSON)
+    print("[DEBUG] Saving debug data to Supabase...")
+    
+    try:
+        url, key = load_secrets()
+        supabase: Client = create_client(url, key)
+        
+        # Clear previous data for this symbol/tf/exchange (avoid duplicates)
+        supabase.table("mining_accepted_patterns")\
+            .delete()\
+            .eq("symbol", symbol)\
+            .eq("tf", tf)\
+            .eq("exchange", exchange)\
+            .execute()
+        
+        supabase.table("mining_rejected_patterns")\
+            .delete()\
+            .eq("symbol", symbol)\
+            .eq("tf", tf)\
+            .eq("exchange", exchange)\
+            .execute()
+        
+        print(f"[INFO] Cleared previous debug data for {symbol} {tf} {exchange}")
+        
+        # Prepare accepted patterns for insert
+        accepted_records = []
+        for rule in rules_debug:
+            pattern = rule.get("pattern")
+            if isinstance(pattern, tuple):
+                pattern = list(pattern)
+            
+            accepted_records.append({
+                "run_version": BUILD_VERSION,
+                "symbol": symbol,
+                "tf": tf,
+                "exchange": exchange,
+                "pattern": pattern,
+                "support": rule.get("support"),
+                "wins_up": rule.get("wins_up"),
+                "wins_down": rule.get("wins_down"),
+                "edge_up": rule.get("edge_up"),
+                "edge_down": rule.get("edge_down"),
+                "tti_probs": rule.get("tti_probs"),
+                "setups": rule.get("setups", []),
+            })
+        
+        # Insert accepted patterns in chunks (same as rejected for consistency)
+        CHUNK_SIZE = 200
+        if accepted_records:
+            for i in range(0, len(accepted_records), CHUNK_SIZE):
+                chunk = accepted_records[i:i + CHUNK_SIZE]
+                supabase.table("mining_accepted_patterns").insert(chunk).execute()
+            print(f"[INFO] Saved {len(accepted_records)} accepted patterns to Supabase")
+        
+        # Prepare rejected patterns for insert
+        rejected_records = []
+        for p in all_rejected:
+            pattern = p.get("pattern")
+            if isinstance(pattern, tuple):
+                pattern = list(pattern)
+            
+            rejected_records.append({
+                "run_version": BUILD_VERSION,
+                "symbol": symbol,
+                "tf": tf,
+                "exchange": exchange,
+                "pattern": pattern,
+                "support": p.get("support"),
+                "wins_up": p.get("wins_up"),
+                "wins_down": p.get("wins_down"),
+                "edge_up": p.get("edge_up"),
+                "edge_down": p.get("edge_down"),
+                "reason": p.get("reason"),
+                "reason_ru": p.get("reason_ru"),
+                "threshold": p.get("threshold"),
+                "setups": p.get("setups", []),
+            })
+        
+        # Insert rejected patterns in chunks (avoid request size limits)
+        CHUNK_SIZE = 200
+        if rejected_records:
+            for i in range(0, len(rejected_records), CHUNK_SIZE):
+                chunk = rejected_records[i:i + CHUNK_SIZE]
+                supabase.table("mining_rejected_patterns").insert(chunk).execute()
+            print(f"[INFO] Saved {len(rejected_records)} rejected patterns to Supabase (chunked)")
+            
+    except Exception as e:
+        print(f"[WARN] Failed to save debug data to Supabase: {e}")
     
     return True, f"Mined {len(selected_rules)} rules."
 
