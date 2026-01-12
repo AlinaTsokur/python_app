@@ -401,6 +401,9 @@ patch_id: PATCH-03-STATS-FORMULAS
    если oi_first == 0 → net_oi_change = 0
    иначе net_oi_change = ((oi_last - oi_first) / oi_first) * 100
    Единицы: проценты.
+   
+   **PATCH-08:** Для net_oi_change допускается NULL в промежуточных свечах буфера,
+   если oi_close присутствует в первой и последней. Формула использует только граничные значения.
 
 3) sum_liq_long
    sum_liq_long = Σ buffer[j].liq_long, j=1..w
