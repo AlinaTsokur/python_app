@@ -235,7 +235,7 @@ def run_binning(symbol, tf, exchange="Binance"):
     
     # 7. Summary
     valid_fields = len([f for f in bins if bins[f] is not None])
-    report = f"Built bins for {valid_fields}/{len(ALL_FIELDS)} fields."
+    report = f"Создано бинов: {valid_fields}/{len(ALL_FIELDS)} полей."
     
     return True, report
 
