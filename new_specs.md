@@ -1478,3 +1478,294 @@ SELECT * FROM training_artifacts
 WHERE artifact_key = 'bins_ETH_1D_Binance' 
 ORDER BY version DESC LIMIT 1
 ```
+ПРАВКИ ПО ХВОСТАМ: 
+Сделать красиво и с минимальными правками можно так: добавить “хвосты” как ещё один (или два) дискретных признака в CORE_STATE, но через один общий интерфейс кодирования, который умеет работать в двух режимах: FULL (основной) и LITE(A) (доп-логика).
+Минимальное решение (2 поля, без усложнений)
+Добавь в CORE_STATE:
+TAIL_DOM — какой хвост доминирует
+U (upper_tail_pct > lower_tail_pct)
+L (lower_tail_pct > upper_tail_pct)
+N (равны/оба маленькие)
+
+
+TAIL_BIN / TAIL_ZONE — “сила” хвоста
+сила = max(upper_tail_pct, lower_tail_pct) (строго “из полей”)
+FULL: биннить в Q1..Q5 через bins.json (как cvd/clv)
+LITE(A): биннить в LOW/MID/HIGH (как ты уже делала для CVD/CLV)
+Как это внедрить с минимальными редакциями
+Сделать одну функцию encode_core_state(candle, mode)
+
+
+mode=FULL → выдаёт DIV|F|CVD_Q|CLV_Q|TAIL_DOM|TAIL_Q
+mode=LITE_A → выдаёт DIV|F_ZONE|CVD_ZONE|CLV_ZONE|TAIL_DOM|TAIL_ZONE
+
+
+В bins builder добавить один новый признак: tail_max_pct
+
+
+FULL: строишь квантили Q1..Q5 по всем шагам i (как остальные)
+LITE: квантили не нужны — зоны режешь фиксировано (или через квантили, но 3 зоны)
+
+
+В сериализацию паттерна просто дописываешь поле (канон строка расширяется)
+
+ Пример:
+ DIV=...|F=...|CVD=...|CLV=...|TAIL=U|TQ=Q4 (FULL)
+ DIV=...|FZ=...|CVDZ=...|CLVZ=...|TAIL=U|TZ=HIGH (LITE)
+
+
+Переключатель: один флаг в config (profile: FULL / LITE_A) и всё.
+Как интегрировать новую логику: 
+Profiles в config + один “Tokenizer”
+Идея: логика одна, но токенизация CORE_STATE бывает 2 типов.
+profile = "STRICT" → текущая каноника v2.1:
+ DIV + F (0..15) + CVD(Q1..Q5) + CLV(Q1..Q5)
+
+
+profile = "SMALLN" → сжатая каноника:
+ DIV + F_ZONE(0/1–3/4–7/8–15) + CVD_ZONE(LOW/MID/HIGH) + CLV_ZONE(LOW/MID/HIGH)
+(CVD/CLV зоны можно строить из тех же q20/q40/q60/q80 или прямо из Q1..Q5 маппингом: Q1–Q2=LOW, Q3=MID, Q4–Q5=HIGH)
+
+
+Что меняется в коде минимально:
+добавляешь функцию tokenize_core_state(candle, bins, profile)
+майнинг/онлайн-матчинг работают как раньше, просто строки токенов другие.
+
+
+Важно: артефакты должны быть разные → в artifact_key добавить суффикс режима:
+rules_ETH_1D_Binance_STRICT
+rules_ETH_1D_Binance_SMALLN
+
+
+Патч по добавлению хвостов в основную логику:
+PATCH, который добавляет хвосты в CORE_STATE (DATA-паттерны), биннит их в bins.json, и расширяет каноническую сериализацию. Никаких новых “умных” фич, только “из полей”.
+PATCHLOG_v2.1 — запись
+[PATCH-09-CORE-TAILS] ADD CORE_STATE TAIL FEATURES (approved)
+Дата: 2026-01-15
+Статус: approved
+Затронуто:
+
+
+Stage 1 (1_load_data.py) — CORE_STATE required fields
+Stage 2 (2_simulate_states.py) — формирование CORE_STATE
+Stage 3 (3_build_bins.py) — bins.json (CORE)
+Stage 3/Rules (4_mine_rules_data.py) — канонизация state_str + индекс rules_by_len_last
+Online (signal_detector.py, PATCH-01 buffer) — core_state в буфере + сериализация last_state
+
+
+Цель: учесть геометрию свечи через хвосты в DATA-паттернах (CORE_STATE), сохранив детерминизм и “из полей”.
+
+
+1) Изменение CORE_STATE: новые поля (строго “из полей”)
+1.1 Новые CORE-числовые признаки (для биннинга через bins.json)
+Добавить в CORE_STATE два бин-поля:
+upper_tail_bin = bin(c.upper_tail_pct) через bins.json
+lower_tail_bin = bin(c.lower_tail_pct) через bins.json
+
+
+Источник значений: строго c.upper_tail_pct, c.lower_tail_pct.
+Запрещено: пересчитывать хвосты из OHLC.
+1.2 Обновлённый ключ CORE_STATE
+Было:
+CORE_STATE = (div_type, oi_flags, cvd_pct_bin, clv_bin)
+Становится:
+CORE_STATE = (div_type, oi_flags, cvd_pct_bin, clv_bin, upper_tail_bin, lower_tail_bin)
+2) Stage 1: правила DROP/валидация (минимально)
+2.1 CORE_STATE обязательные поля (добавить хвосты)
+В список обязательных полей CORE_STATE (каждая свеча CONTEXT.DATA) добавить:
+upper_tail_pct
+lower_tail_pct
+
+
+Правило прежнее: если в любой свече отсутствует/NULL/NaN любое обязательное поле CORE_STATE → DROP_CORE_MISSING / DROP_NAN_PRESENT.
+Примечание: сейчас tails уже фигурируют как “числовые поля используемые в STATS”; этим патчем они становятся ещё и CORE-обязательными.
+
+3) Stage 2: simulate_states (CORE_STATE + bins)
+3.1 Добавить биннинг хвостов в core_state
+При формировании core_state на шаге i:
+upper_tail_bin = bin(c.upper_tail_pct) через bins.json
+lower_tail_bin = bin(c.lower_tail_pct) через bins.json
+Никаких других хвостовых метрик (типа tail_dom/tail_max) в основной логике не вводим этим патчем — только две.
+4) Stage 3: bins.json (CORE бинним расширенно)
+4.1 Что бинним в CORE
+Добавить к CORE-биннингу:
+upper_tail_pct
+lower_tail_pct
+
+
+Правила построения квантилей и назначения Q1..Q5 — без изменений:
+pooled по всем шагам i всех сетапов
+numpy.quantile(..., method='linear')
+NULL не участвует, NaN запрещён, out-of-range → крайние бины
+5) Rules DATA: канонизация и индекс (обязательный апдейт)
+5.1 Каноническая сериализация CORE_STATE (PATCH-08 меняется)
+Было: DIV={div_type}|F={oi_flags}|CVD={Qx}|CLV={Qx}
+Становится: DIV={div_type}|F={oi_flags}|CVD={Qx}|CLV={Qx}|UT={Qx}|LT={Qx}
+Где:
+UT = upper_tail_bin (Q1..Q5)
+LT = lower_tail_bin (Q1..Q5)
+Пробелы запрещены. Формат фиксированный.
+5.2 Индекс rules_by_len_last
+Без изменений по структуре, но last_state_string теперь включает UT/LT.
+6) Online buffer (PATCH-01 дополняется)
+6.1 core_state в буфере расширить
+В buffer[].core_state добавить:
+upper_tail_bin
+lower_tail_bin
+6.2 update_buffer(candle)
+При построении core_state в онлайне: биннить c.upper_tail_pct и c.lower_tail_pct через bins.json и сохранять в core_state
+RAW часть буфера не меняется (tails уже там есть для STATS).
+7) Обновление оценки размерности (для прозрачности)
+Было уникальных CORE_STATE: 5*16*5*5 = 2000
+Станет: 5*16*5*5*5*5 = 50 000
+Это допустимо (детектор всё равно матчится по индексу (L,last_state)), но ожидаемо снизит support и потребует больше данных — это нормальный компромисс за “геометрию”.
+Дополнительная логика для задач с сетапами от 50-500:
+чистовик PATCH так, чтобы:
+Профили остаются: STRICT и SMALLN
+Хвосты в CORE_STATE остаются ТОЛЬКО как TD (доминирование)
+Силу хвоста (TQ/TZ/tail_max_pct) УБИРАЕМ полностью
+Логика остаётся дешёвой, без лишней фрагментации, и без усложнения bins
+Ничего важного по назначению (SMALLN для малого N) не теряем
+Ниже — готовый блок, который можно вставить в PATCHLOG_v2.1.md.
+PATCHLOG_v2.1 — НОВЫЕ ЗАПИСИ (ЧИСТОВИК)
+[PATCH-09] CORE_STATE_PROFILES_TOKENIZER (approved)
+Дата: 2026-01-15
+Затронуто: Stage 2 (offline/2_simulate_states.py), Stage 4 (offline/4_mine_rules_data.py), Stage 5 (online/signal_detector.py), Stage 7 (offline/7_backtest_optimize.py), config.json, ARTIFACT_KEY
+Суть: добавить профили токенизации CORE_STATE: STRICT и SMALLN, через единую функцию:
+ tokenize_core_state(candle, bins, profile) -> state_str
+ Майнинг/онлайн матчинг/скоринг/индекс не меняются, меняются только строки токенов.
+Важно: артефакты раздельные по профилю; artifact_key получает суффикс _{profile}.
+
+
+[PATCH-10] TAIL_DOM_ONLY_IN_CORE_STATE (approved)
+Дата: 2026-01-15
+Затронуто: Stage 1 (offline/1_load_data.py), Stage 2, Stage 4, Stage 5, Stage 7, PATCH-08 канонизация rules_data, config.json
+Суть: добавить хвосты в CORE_STATE только как доминирование TAIL_DOM (TD) без силы хвоста.
+ Это “дешёвый” дискретный сигнал, минимально увеличивает кардинальность состояний и подходит для SMALLN.
+1) Назначение (прямое)
+STRICT = основная каноника v2.1, но + TD как ещё один дискретный признак.
+SMALLN = сжатая каноника для малого N, чтобы:
+уменьшить число уникальных CORE_STATE,
+снизить фрагментацию паттернов,
+сохранить всю архитектуру (PrefixSpan contiguous / индекс / матчинг / скоринг) без изменений.
+2) Stage 1 — данные и DROP-правила (важно)
+2.1 Обязательные поля CORE_STATE — НЕ РАСШИРЯЕМ хвостами
+Запрещено добавлять upper_tail_pct и lower_tail_pct в список обязательных CORE_STATE полей.
+Причина: на графике бывают свечи без хвостов, а также возможны пропуски по этим полям; добавление в обязательные поля приведёт к росту DROP_CORE_MISSING.
+Итого список обязательных полей CORE_STATE остаётся как в v2.1:
+price_sign
+cvd_sign
+cvd_pct
+clv_pct
+oi_set
+oi_unload
+oi_counter
+oi_in_sens
+2.2 Правило TD при отсутствии хвостовых полей (детерминированно)
+Если upper_tail_pct или lower_tail_pct отсутствует/NULL на свече, то: TD = N (нейтрально)
+Это не влияет на DROP (потому что хвосты не входят в обязательный CORE_STATE список).
+NaN по-прежнему запрещён общим правилом загрузки: NaN в любом числовом поле → DROP_NAN_PRESENT.
+
+3) Stage 3 — bins.json: без изменений
+НЕ добавляем новый биннимый признак tail_max_pct
+НЕ добавляем пороги/квантили для хвостов
+bins.json остаётся строго по v2.1 (cvd_pct, clv_pct + boost и т.д.)
+4) Определение TAIL_DOM (TD) — строго “из полей”
+Используем только upper_tail_pct и lower_tail_pct:
+Если оба поля присутствуют и не NULL:
+
+
+TD = U, если upper_tail_pct > lower_tail_pct
+TD = L, если lower_tail_pct > upper_tail_pct
+TD = N, если upper_tail_pct == lower_tail_pct
+
+
+Если любое из полей отсутствует/NULL:
+
+
+TD = N
+5) Профили токенизации (обновление tokenize_core_state)
+5.1 config.json — добавить профиль
+В online/config.json и в offline pipeline config:
+{"profile": "STRICT",
+  "buffer_size": 30,
+  "max_pattern_length": 15
+}
+(значение profile: "STRICT" или "SMALLN")
+5.2 tokenize_core_state(candle, bins, profile) → state_str
+Единый переключатель, возвращает каноническую строку CORE_STATE (токен), которая участвует в паттернах.
+6) STRICT профиль (v2.1 + TD)
+6.1 Состав токена STRICT
+DIV (5 классов)
+F (oi_flags 0..15)
+CVD (Q1..Q5 по cvd_pct через bins.json)
+CLV (Q1..Q5 по clv_pct через bins.json)
+TD (U/L/N)
+6.2 Каноническая строка STRICT (расширение PATCH-08)
+PATCH-08 канонизацию rules_data расширить до:
+DIV={div_type}|F={oi_flags}|CVD={Qx}|CLV={Qx}|TD={U/L/N}
+Пробелы запрещены. Q только Q1..Q5.
+Пример: DIV=match_up|F=5|CVD=Q3|CLV=Q2|TD=U
+7) SMALLN профиль (сжатый + TD)
+7.1 F_ZONE (сжатие oi_flags)
+Вместо F=0..15 используем зоны:
+FZ=0 если oi_flags == 0
+FZ=1-3 если 1..3
+FZ=4-7 если 4..7
+FZ=8-15 если 8..15
+7.2 CVD_ZONE/CLV_ZONE из Q1..Q5 (маппинг)
+Сначала бинним cvd_pct/clv_pct в Q1..Q5 через bins.json, затем маппим:
+Q1–Q2 → LOW
+Q3 → MID
+Q4–Q5 → HIGH
+7.3 Каноническая строка SMALLN
+DIV={div_type}|FZ={zone}|CVDZ={LOW/MID/HIGH}|CLVZ={LOW/MID/HIGH}|TD={U/L/N}
+Пример: DIV=match_up|FZ=4-7|CVDZ=MID|CLVZ=LOW|TD=U
+8) Что НЕ меняется (обязательно)
+Вообще не трогаем:
+contiguous PrefixSpan/майнинг
+support/wins по уникальным сетапам
+Beta-prior, edge, coverage selection
+индекс rules_by_len_last и suffix-match
+STATS слой/правила/биннинг stats
+scoring (avg_logit_*), alpha, threshold, flicker, ETA
+replay/backtest и лимит 30
+Меняется только:
+как строится state_str (токенизация CORE_STATE)
+формат строк паттернов в rules_data.json
+artifact_key (суффикс профиля)
+9) ARTIFACT_KEY: суффикс профиля (обязательно)
+Формат ключа артефакта:
+{type}_{symbol}_{tf}_{exchange}_{profile}
+Примеры:
+bins_ETH_1D_Binance_STRICT
+rules_data_ETH_1D_Binance_SMALLN
+bins_stats_ETH_1D_Binance_STRICT
+rules_stats_ETH_1D_Binance_STRICT
+calibration_ETH_1D_Binance_STRICT
+config_ETH_1D_Binance_STRICT
+
+
+10) Обновления по файлам (минимально)
+Stage 1 — offline/1_load_data.py
+НЕ добавлять хвосты в CORE обязательные поля
+TD вычисляется как N, если хвостовые поля отсутствуют/NULL (без DROP)
+Stage 2 — offline/2_simulate_states.py
+вместо прямой сериализации вызывать tokenize_core_state(…, profile)
+Stage 3 — offline/3_build_bins.py
+без изменений (tail_max_pct не добавляем)
+Stage 4 — offline/4_mine_rules_data.py
+работает с token-строками как раньше (дедуп/индекс по новым строкам)
+Stage 5 — online/signal_detector.py
+в update_buffer строить core_state_string через tokenize_core_state
+suffix-match/индекс без изменений
+Stage 7 — offline/7_backtest_optimize.py
+прогон Detector с указанным profile
+calibration/config сохранять раздельно по profile
+11) Definition of Done (для этой доп-логики)
+Для одного (symbol,tf,exchange) пайплайн строит артефакты отдельно для STRICT и SMALLN (разные artifact_key).
+rules_data.json: pattern-строки содержат TD=... в обоих профилях.
+bins.json не меняется (нет tail_max_pct).
+Online Detector при одинаковом candles_seq выдаёт валидный JSON и в STRICT, и в SMALLN (direction/confidence/eta по контракту).
+Индекс rules_by_len_last строится и используется и корректно учитывает новый last_state_string (с TD).
+ 

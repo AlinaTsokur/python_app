@@ -36,107 +36,8 @@ def init_connection():
 supabase: Client = init_connection()
 
 # --- 🎨 CSS: PREMIUM DESIGN ---
-st.markdown("""
-    <style>
-        .stApp {
-            background-color: #0e1117;
-            background-image: 
-                radial-gradient(at 0% 0%, rgba(45, 55, 72, 0.6) 0px, transparent 50%),
-                radial-gradient(at 100% 0%, rgba(20, 30, 60, 0.6) 0px, transparent 50%),
-                radial-gradient(at 100% 100%, rgba(45, 55, 72, 0.6) 0px, transparent 50%),
-                radial-gradient(at 0% 100%, rgba(20, 30, 60, 0.6) 0px, transparent 50%);
-            background-attachment: fixed;
-            color: #E0E0E0;
-        }
-        
-        /* Remove ALL Container Borders (Nuclear Option) */
-        [data-testid="stVerticalBlockBorderWrapper"], [data-testid="stVerticalBlockBorderWrapper"] > div {
-            border: none !important;
-            box-shadow: none !important;
-            background: transparent !important;
-        }
-
-        .tf-badge {
-            background: linear-gradient(135deg, #ECEFF1, #B0BEC5);
-            color: #263238; padding: 3px 10px; border-radius: 12px;
-            font-size: 0.85em; font-weight: 700; margin-left: 8px;
-            border: 1px solid rgba(255,255,255,0.4);
-            box-shadow: 0 0 10px rgba(176, 190, 197, 0.3);
-        }
-        /* Clean Tabs */
-        .stTabs [data-baseweb="tab-list"] {
-            gap: 8px;
-            border-bottom: 0px solid transparent !important;
-        }
-        .stTabs [data-baseweb="tab"] {
-            height: 40px;
-            white-space: pre-wrap;
-            background-color: transparent !important;
-            border: none !important;
-            color: #E0E0E0;
-        }
-        .stTabs [aria-selected="true"] {
-             background-color: transparent !important;
-             border-bottom: 2px solid #FAFAFA !important;
-             color: #FFFFFF !important;
-        }
-        /* Remove the default grey line */
-        .stTabs [data-baseweb="tab-border"] {
-             display: none !important;
-        }
-        /* Remove Code Block frames */
-        [data-testid="stCodeBlock"] {
-            border: none !important;
-            box-shadow: none !important;
-        }
-        [data-testid="stCodeBlock"] > div {
-             border: none !important;
-             background-color: transparent !important;
-        }
-        /* Clean Tab Panel */
-        [data-baseweb="tab-panel"] {
-             padding-top: 10px !important;
-        }
-        /* Make header transparent */
-        header[data-testid="stHeader"] {
-            background: transparent !important;
-        }
-
-        /* --- NAVIGATION TABS (Radio) --- */
-        [data-testid="stRadio"] > div {
-            flex-direction: row;
-            gap: 20px; /* Space between textual tabs */
-            background: transparent !important;
-            padding: 0px;
-            display: inline-flex;
-            border-bottom: 0px solid rgba(255,255,255,0.1);
-        }
-        [data-testid="stRadio"] label {
-            background: transparent !important;
-            padding: 5px 0px; /* Minimal padding */
-            color: #90A4AE; /* Muted text */
-            font-weight: 500;
-            transition: all 0.2s;
-            margin-right: 0 !important;
-            border: none;
-            cursor: pointer;
-            border-radius: 0px;
-            border-bottom: 2px solid transparent; /* Prepare for underline */
-        }
-        /* Selected State */
-        [data-testid="stRadio"] label[data-checked="true"] {
-             color: #FFFFFF !important;
-             font-weight: 600;
-             border-bottom: 2px solid #FFFFFF !important; /* Simple underline */
-             box-shadow: none !important;
-        }
-        /* Hover State */
-        [data-testid="stRadio"] label:hover {
-             color: #FFFFFF;
-        }
-        
-    </style>
-""", unsafe_allow_html=True)
+import styles
+styles.apply_styles(st)
 
 # --- ⚙️ Загрузка конфигураций из БД ---
 @st.cache_data(ttl=300)
@@ -715,11 +616,13 @@ import batch_parser
 importlib.reload(batch_parser) # Force reload to apply fixes immediately
 
 # Dynamic Import of Offline modules
-from offline import stage1_loader, stage2_features, stage3_bins, stage4_rules
+from offline import stage1_loader, stage2_features, stage3_bins, stage4_rules, stage5_bins_stats, stage6_mine_stats
 importlib.reload(stage1_loader)
 importlib.reload(stage2_features)
 importlib.reload(stage3_bins)
 importlib.reload(stage4_rules)
+importlib.reload(stage5_bins_stats)
+importlib.reload(stage6_mine_stats)
 
 TABS = ["Отчеты", "Свечи", "Дивер", "Уровни", "Лаборатория", "Обучение"]
 
@@ -888,11 +791,35 @@ if selected_tab == "Обучение":
                                          st.error(msg4)
                                      else:
                                          status.write(f"✅ Паттерны найдены: {msg4}")
-                                         status.update(label="🎉 Обучение завершено успешно!", state="complete")
-                                         st.balloons()
                                          
-                                         # DISPLAY FOUND RULES
-                                         _display_found_rules(tr_symbol, tr_tf, tr_exchange)
+                                         # PHASE 5: STATS BINS
+                                         status.write("📈 Шаг 5: STATS квантили...")
+                                         try:
+                                             success5, msg5 = stage5_bins_stats.run_bins_stats(tr_symbol, tr_tf, tr_exchange)
+                                             if not success5:
+                                                 status.update(label="❌ Ошибка STATS bins!", state="error")
+                                                 st.error(msg5)
+                                             else:
+                                                 status.write(f"✅ STATS bins: {msg5}")
+                                                 
+                                                 # PHASE 6: STATS RULES
+                                                 status.write("🔬 Шаг 6: STATS правила...")
+                                                 try:
+                                                     success6, msg6 = stage6_mine_stats.run_mine_stats(tr_symbol, tr_tf, tr_exchange)
+                                                     if not success6:
+                                                         status.update(label="❌ Ошибка STATS правил!", state="error")
+                                                         st.error(msg6)
+                                                     else:
+                                                         status.write(f"✅ STATS правила: {msg6}")
+                                                         status.update(label="🎉 Обучение завершено!", state="complete")
+                                                         st.balloons()
+                                                         _display_found_rules(tr_symbol, tr_tf, tr_exchange)
+                                                 except Exception as e:
+                                                     status.update(label="❌ Ошибка Stage 6", state="error")
+                                                     st.error(str(e))
+                                         except Exception as e:
+                                             status.update(label="❌ Ошибка Stage 5", state="error")
+                                             st.error(str(e))
                                          
                                  except Exception as e:
                                      status.update(label="❌ Критическая ошибка (Stage 4)", state="error")
