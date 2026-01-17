@@ -2,16 +2,18 @@
 Stage 2: Feature Engineering (2_simulate_states.py)
 Simulates online mode: processes each setup step-by-step, creating CORE_STATE and BOOST metrics.
 
-Per ТЗ v2.1:
-- CORE_STATE: div_type, oi_flags, cvd_pct, clv_pct
+Per ТЗ v2.1 + PATCH-10:
+- CORE_STATE: div_type, oi_flags, cvd_pct, clv_pct, td
 - BOOST: vol_rank, doi_rank, liq_rank (+ top1_share variants)
 - rank = None if i < 5
 - BOOST fields (volume/doi_pct/liq_*) use None-safe handling (no fake zeros)
+- td = tail dominance (U/L/N) calculated via get_tail_dom()
 """
 
 import json
 import math
 from pathlib import Path
+from tokenizer import get_tail_dom
 
 # --- HELPERS ---
 
@@ -131,11 +133,18 @@ def process_segment(seg):
     
     for i, c in enumerate(candles):
         # === CORE_STATE ===
+        # TD: fallback to "N" if calculation fails (NaN, type errors, etc.)
+        try:
+            td = get_tail_dom(c)
+        except Exception:
+            td = "N"
+        
         core_state = {
             "div_type": get_div_type(c.get("price_sign"), c.get("cvd_sign")),
             "oi_flags": get_oi_flags(c),
             "cvd_pct": c.get("cvd_pct"),
             "clv_pct": c.get("clv_pct"),
+            "td": td,  # PATCH-10: tail dominance (U/L/N)
         }
         
         # === BOOST: Update history (None-safe) ===
@@ -235,7 +244,7 @@ def run_simulation(symbol, tf, exchange="Binance"):
     if any(v > 0 for v in total_warnings.values()):
         print(f"[WARN] Missing BOOST fields: {total_warnings}")
     
-    report = f"Processed {len(segments)} segments -> {total_steps} steps."
+    report = f"Обработано {len(segments)} сегментов → {total_steps} шагов."
     return True, report, len(enriched)
 
 
