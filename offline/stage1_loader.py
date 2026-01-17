@@ -6,11 +6,6 @@ from pathlib import Path
 from supabase import create_client, Client
 import math
 
-# --- DEFAULT CONFIG ---
-TARGET_SYMBOL = "ETH"
-TARGET_TF = "1D"
-TARGET_EXCHANGE = "Binance"
-
 # Core numerical fields that must NOT be None
 # CORE_STATE обязательные поля (PATCH: NULL/NaN -> DROP setup)
 CORE_FIELDS_CHECK = [
@@ -239,10 +234,20 @@ def run_pipeline(symbol, tf, exchange="Binance", limit=10000):
     if len(clean_segments) < 10:
         print(f"[WARN] Too few samples ({len(clean_segments)}) for reliable training!")
         
-    report = f"Fetched: {len(raw_segments)} | Clean: {len(clean_segments)} | Dropped: {len(raw_segments)-len(clean_segments)}"
+    report = f"Загружено: {len(raw_segments)} | Чистых: {len(clean_segments)} | Отброшено: {len(raw_segments)-len(clean_segments)}"
     return True, report, len(clean_segments)
 
 if __name__ == "__main__":
-    # Default execution using configured constants
-    res, msg, cnt = run_pipeline(TARGET_SYMBOL, TARGET_TF, TARGET_EXCHANGE)
+    import sys
+    
+    if len(sys.argv) < 4:
+        print("Usage: python stage1_loader.py <symbol> <tf> <exchange>")
+        print("Example: python stage1_loader.py ETH 1D Binance")
+        sys.exit(1)
+    
+    symbol = sys.argv[1]
+    tf = sys.argv[2]
+    exchange = sys.argv[3]
+    
+    res, msg, cnt = run_pipeline(symbol, tf, exchange)
     print(f"[{'OK' if res else 'ERROR'}] {msg}")
