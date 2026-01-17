@@ -218,8 +218,8 @@ def run_pipeline(symbol, tf, exchange="Binance", limit=10000):
     clean_tf = tf.replace("/", "")
     clean_ex = exchange.replace("/", "")
     
-    outfile = Path(f"offline/data/{clean_symbol}_{clean_tf}_{clean_ex}_clean.json")
-    dropped_file = Path(f"offline/data/{clean_symbol}_{clean_tf}_{clean_ex}_dropped.json")
+    outfile = Path(__file__).parent / "data" / f"{clean_symbol}_{clean_tf}_{clean_ex}_clean.json"
+    dropped_file = Path(__file__).parent / "data" / f"{clean_symbol}_{clean_tf}_{clean_ex}_dropped.json"
     
     outfile.parent.mkdir(parents=True, exist_ok=True)
     

@@ -740,6 +740,8 @@ if selected_tab == "Обучение":
         tr_symbol = st.selectbox("Тикер", ["ETH", "BTC", "SOL", "BNB"], index=0)
         tr_tf = st.selectbox("Таймфрейм", ["1D", "4h", "1h", "15m"], index=0)
         tr_exchange = st.text_input("Биржа", "Binance")
+        tr_profile = st.selectbox("Профиль токенов", ["STRICT", "SMALLN"], index=1, 
+                                   help="STRICT: полные бины (Q1-Q5), SMALLN: сжатые зоны (LOW/MID/HIGH)")
         
         start_btn = st.button("🚀 ЗАПУСТИТЬ ОБУЧЕНИЕ", type="primary", use_container_width=True)
         
@@ -784,7 +786,7 @@ if selected_tab == "Обучение":
                                  # PHASE 4: MINING RULES
                                  status.write("🔍 Шаг 4: Поиск паттернов (Mining)...")
                                  try:
-                                     success4, msg4 = stage4_rules.run_mining(tr_symbol, tr_tf, tr_exchange)
+                                     success4, msg4 = stage4_rules.run_mining(tr_symbol, tr_tf, tr_exchange, profile=tr_profile)
                                      
                                      if not success4:
                                          status.update(label="❌ Ошибка поиска паттернов!", state="error")

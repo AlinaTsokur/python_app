@@ -52,7 +52,7 @@ def load_features(symbol, tf, exchange):
     clean_symbol = symbol.replace("/", "").replace(":", "")
     clean_tf = tf.replace("/", "")
     clean_ex = exchange.replace("/", "")
-    filepath = Path(f"offline/data/{clean_symbol}_{clean_tf}_{clean_ex}_features.json")
+    filepath = Path(__file__).parent / "data" / f"{clean_symbol}_{clean_tf}_{clean_ex}_features.json"
     
     if not filepath.exists():
         return None, f"File not found: {filepath}"
@@ -219,7 +219,7 @@ def run_binning(symbol, tf, exchange="Binance"):
     }
     
     # 5. Save locally
-    outfile = Path(f"offline/data/{clean_symbol}_{clean_tf}_{clean_ex}_bins.json")
+    outfile = Path(__file__).parent / "data" / f"{clean_symbol}_{clean_tf}_{clean_ex}_bins.json"
     outfile.parent.mkdir(parents=True, exist_ok=True)
     
     with open(outfile, "w") as f:

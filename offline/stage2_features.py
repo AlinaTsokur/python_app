@@ -12,7 +12,14 @@ Per ТЗ v2.1 + PATCH-10:
 
 import json
 import math
+import sys
 from pathlib import Path
+
+# Add offline directory to path for tokenizer import
+_offline_dir = Path(__file__).parent
+if str(_offline_dir) not in sys.path:
+    sys.path.insert(0, str(_offline_dir))
+
 from tokenizer import get_tail_dom
 
 # --- HELPERS ---
@@ -102,7 +109,7 @@ def load_clean_data(symbol, tf, exchange):
     clean_symbol = symbol.replace("/", "").replace(":", "")
     clean_tf = tf.replace("/", "")
     clean_ex = exchange.replace("/", "")
-    filepath = Path(f"offline/data/{clean_symbol}_{clean_tf}_{clean_ex}_clean.json")
+    filepath = Path(__file__).parent / "data" / f"{clean_symbol}_{clean_tf}_{clean_ex}_clean.json"
     
     if not filepath.exists():
         return None, f"File not found: {filepath}"
@@ -234,7 +241,7 @@ def run_simulation(symbol, tf, exchange="Binance"):
     clean_symbol = symbol.replace("/", "").replace(":", "")
     clean_tf = tf.replace("/", "")
     clean_ex = exchange.replace("/", "")
-    outfile = Path(f"offline/data/{clean_symbol}_{clean_tf}_{clean_ex}_features.json")
+    outfile = Path(__file__).parent / "data" / f"{clean_symbol}_{clean_tf}_{clean_ex}_features.json"
     
     outfile.parent.mkdir(parents=True, exist_ok=True)
     with open(outfile, "w") as f:

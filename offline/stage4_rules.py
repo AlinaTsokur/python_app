@@ -2,8 +2,9 @@
 Stage 4: Mining Rules (4_mine_rules_data.py)
 Finds contiguous patterns in CORE_STATE that predict impulse direction.
 
-Per ТЗ v2.1 + PATCH-08:
-- Token format: DIV={div_type}|F={oi_flags}|CVD={Qx}|CLV={Qx}
+Per ТЗ v2.1 + PATCH-08/09/10:
+- Token format: DIV={div_type}|F={oi_flags}|CVD={Qx}|CLV={Qx}|TD={U/L/N}
+- Profiles: STRICT (full bins) or SMALLN (compressed zones)
 - Contiguous patterns only (no gaps)
 - Support/wins by unique setups
 - Beta-prior smoothing for probabilities
@@ -20,11 +21,19 @@ Per ТЗ v2.1 + PATCH-08:
 
 import json
 import math
+import sys
 import tomllib
 from pathlib import Path
 from datetime import datetime, timezone
 from collections import defaultdict
 from supabase import create_client, Client
+
+# Add offline directory to path for tokenizer import
+_offline_dir = Path(__file__).parent
+if str(_offline_dir) not in sys.path:
+    sys.path.insert(0, str(_offline_dir))
+
+from tokenizer import tokenize_core_state
 
 # --- CONFIG ---
 PATCHLOG_VERSION = "PATCHLOG_v2.1@2026-01-10"
@@ -54,7 +63,7 @@ def load_features(symbol, tf, exchange):
     clean_symbol = symbol.replace("/", "").replace(":", "")
     clean_tf = tf.replace("/", "")
     clean_ex = exchange.replace("/", "")
-    filepath = Path(f"offline/data/{clean_symbol}_{clean_tf}_{clean_ex}_features.json")
+    filepath = Path(__file__).parent / "data" / f"{clean_symbol}_{clean_tf}_{clean_ex}_features.json"
     
     if not filepath.exists():
         return None, f"File not found: {filepath}"
@@ -69,22 +78,7 @@ def load_bins(symbol, tf, exchange):
     clean_symbol = symbol.replace("/", "").replace(":", "")
     clean_tf = tf.replace("/", "")
     clean_ex = exchange.replace("/", "")
-    filepath = Path(f"offline/data/{clean_symbol}_{clean_tf}_{clean_ex}_bins.json")
-    
-    if not filepath.exists():
-        return None, f"File not found: {filepath}"
-    
-    with open(filepath, "r") as f:
-        data = json.load(f)
-    return data, None
-
-
-def load_clean_data(symbol, tf, exchange):
-    """Load clean data from Stage 1 output (for segment metadata: ts_start, ts_end)."""
-    clean_symbol = symbol.replace("/", "").replace(":", "")
-    clean_tf = tf.replace("/", "")
-    clean_ex = exchange.replace("/", "")
-    filepath = Path(f"offline/data/{clean_symbol}_{clean_tf}_{clean_ex}_clean.json")
+    filepath = Path(__file__).parent / "data" / f"{clean_symbol}_{clean_tf}_{clean_ex}_bins.json"
     
     if not filepath.exists():
         return None, f"File not found: {filepath}"
@@ -129,10 +123,11 @@ def assign_bin(value, thresholds):
         return "Q5"
 
 
-def tokenize_state(step, bins_fields):
+def tokenize_state(step, bins_fields, profile):
     """
-    PATCH-08: Canonical token format.
-    DIV={div_type}|F={oi_flags}|CVD={Qx}|CLV={Qx}
+    PATCH-09/10: Canonical token format with TD and profile support.
+    STRICT: DIV={div_type}|F={oi_flags}|CVD={Qx}|CLV={Qx}|TD={U/L/N}
+    SMALLN: DIV={div_type}|FZ={zone}|CVDZ={zone}|CLVZ={zone}|TD={U/L/N}
     Returns None if any required field is missing (segment will be dropped).
     """
     core = step.get("core_state")
@@ -142,9 +137,14 @@ def tokenize_state(step, bins_fields):
     # Use .get() to prevent KeyError on missing fields
     div_type = core.get("div_type")
     oi_flags_raw = core.get("oi_flags")
+    td = core.get("td")  # PATCH-10: from Stage 2
     
     if div_type is None or oi_flags_raw is None:
         return None
+    
+    # Fallback for td if missing or invalid (old features.json or garbage)
+    if td not in {"U", "L", "N"}:
+        td = "N"
     
     # Normalize oi_flags to int for stable token format
     try:
@@ -152,6 +152,7 @@ def tokenize_state(step, bins_fields):
     except (ValueError, TypeError):
         return None
     
+    # Bin CVD and CLV
     cvd_bin = assign_bin(core.get("cvd_pct"), bins_fields.get("cvd_pct"))
     clv_bin = assign_bin(core.get("clv_pct"), bins_fields.get("clv_pct"))
     
@@ -159,7 +160,19 @@ def tokenize_state(step, bins_fields):
     if cvd_bin is None or clv_bin is None:
         return None
     
-    return f"DIV={div_type}|F={oi_flags}|CVD={cvd_bin}|CLV={clv_bin}"
+    # Build full core_state for tokenizer
+    full_core_state = {
+        "div_type": div_type,
+        "oi_flags": oi_flags,
+        "cvd_bin": cvd_bin,
+        "clv_bin": clv_bin,
+        "td": td,
+    }
+    
+    try:
+        return tokenize_core_state(full_core_state, profile)
+    except ValueError:
+        return None
 
 
 def find_all_matches(pattern, seq):
@@ -181,6 +194,10 @@ def compute_eta_probs(tti_hist):
     count_EARLY = sum(v for t, v in tti_hist.items() if t >= 5)
     
     total = count_NEAR + count_MID + count_EARLY
+    
+    # Protection against ZeroDivision (edge case: empty tti_hist)
+    if total == 0:
+        return {"NEAR": 1/3, "MID": 1/3, "EARLY": 1/3}
     
     return {
         "NEAR": (count_NEAR + 1) / (total + 3),
@@ -288,12 +305,18 @@ def mine_patterns_apriori(sequences, setup_ids, y_dirs, min_support, max_len):
 # --- MAIN LOGIC ---
 
 
-def run_mining(symbol, tf, exchange="Binance"):
+def run_mining(symbol, tf, exchange="Binance", profile="STRICT"):
     """
     Execute Step 1.4: Mine Rules.
+    Args:
+        profile: "STRICT" or "SMALLN" (PATCH-09)
     Returns: (success: bool, message: str)
     """
-    print(f"[START] Mining rules for {symbol} {tf} ({exchange})...")
+    print(f"[START] Mining rules for {symbol} {tf} ({exchange}) profile={profile}...")
+    
+    # Fail-fast: validate profile
+    if profile not in ("STRICT", "SMALLN"):
+        return False, f"Invalid profile='{profile}'. Expected 'STRICT' or 'SMALLN'."
     
     # 1. Load data
     segments, err = load_features(symbol, tf, exchange)
@@ -335,6 +358,7 @@ def run_mining(symbol, tf, exchange="Binance"):
         # Strict uniqueness check - fail on duplicates
         if base_id in seen_ids:
             return False, f"DUPLICATE_ID: segment id '{base_id}' appears multiple times. IDs must be unique."
+        seen_ids.add(base_id)  # Add immediately to catch ALL duplicates
         
         # Validate y_dir - don't use default
         y_dir = seg.get("y_dir")
@@ -346,7 +370,7 @@ def run_mining(symbol, tf, exchange="Binance"):
         seq = []
         segment_valid = True
         for step in seg.get("steps", []):
-            token = tokenize_state(step, bins_fields)
+            token = tokenize_state(step, bins_fields, profile)
             if token is None:
                 segment_valid = False
                 break
@@ -358,7 +382,6 @@ def run_mining(symbol, tf, exchange="Binance"):
         
         if seq:  # non-empty
             sequences.append(seq)
-            seen_ids.add(base_id)
             setup_base_ids.append(base_id)
             y_dirs.append(y_dir)
     
@@ -554,8 +577,8 @@ def run_mining(symbol, tf, exchange="Binance"):
         "index_by_len_last": index_by_len_last,
     }
     
-    # 11. Save locally
-    outfile = Path(f"offline/data/{clean_symbol}_{clean_tf}_{clean_ex}_rules.json")
+    # 11. Save locally (with profile suffix per PATCH-11)
+    outfile = Path(__file__).parent / "data" / f"{clean_symbol}_{clean_tf}_{clean_ex}_rules_{profile}.json"
     outfile.parent.mkdir(parents=True, exist_ok=True)
     
     with open(outfile, "w") as f:
@@ -563,7 +586,7 @@ def run_mining(symbol, tf, exchange="Binance"):
     print(f"[INFO] Saved locally: {outfile}")
     
     # 12. Save to Supabase
-    success, msg = save_to_supabase(rules_artifact, symbol, tf, exchange)
+    success, msg = save_to_supabase(rules_artifact, symbol, tf, exchange, profile)
     if success:
         print(f"[INFO] {msg}")
     else:
@@ -648,12 +671,13 @@ def run_mining(symbol, tf, exchange="Binance"):
         url, key = load_secrets()
         supabase: Client = create_client(url, key)
         
-        # Clear previous data for this symbol/tf/exchange (avoid duplicates)
+        # Clear previous data for this symbol/tf/exchange/profile (avoid duplicates)
         supabase.table("mining_accepted_patterns")\
             .delete()\
             .eq("symbol", symbol)\
             .eq("tf", tf)\
             .eq("exchange", exchange)\
+            .eq("profile", profile)\
             .execute()
         
         supabase.table("mining_rejected_patterns")\
@@ -661,9 +685,10 @@ def run_mining(symbol, tf, exchange="Binance"):
             .eq("symbol", symbol)\
             .eq("tf", tf)\
             .eq("exchange", exchange)\
+            .eq("profile", profile)\
             .execute()
         
-        print(f"[INFO] Cleared previous debug data for {symbol} {tf} {exchange}")
+        print(f"[INFO] Cleared previous debug data for {symbol} {tf} {exchange} {profile}")
         
         # Prepare accepted patterns for insert
         accepted_records = []
@@ -677,6 +702,7 @@ def run_mining(symbol, tf, exchange="Binance"):
                 "symbol": symbol,
                 "tf": tf,
                 "exchange": exchange,
+                "profile": profile,  # PATCH-09: profile support
                 "pattern": pattern,
                 "support": rule.get("support"),
                 "wins_up": rule.get("wins_up"),
@@ -707,6 +733,7 @@ def run_mining(symbol, tf, exchange="Binance"):
                 "symbol": symbol,
                 "tf": tf,
                 "exchange": exchange,
+                "profile": profile,  # PATCH-09: profile support
                 "pattern": pattern,
                 "support": p.get("support"),
                 "wins_up": p.get("wins_up"),
@@ -730,11 +757,11 @@ def run_mining(symbol, tf, exchange="Binance"):
     except Exception as e:
         print(f"[WARN] Failed to save debug data to Supabase: {e}")
     
-    return True, f"Mined {len(selected_rules)} rules."
+    return True, f"Найдено {len(selected_rules)} правил."
 
 
-def save_to_supabase(rules_data, symbol, tf, exchange):
-    """Save rules artifact to Supabase."""
+def save_to_supabase(rules_data, symbol, tf, exchange, profile):
+    """Save rules artifact to Supabase (with profile suffix per PATCH-11)."""
     try:
         url, key = load_secrets()
         supabase: Client = create_client(url, key)
@@ -745,7 +772,8 @@ def save_to_supabase(rules_data, symbol, tf, exchange):
     clean_tf = tf.replace("/", "")
     clean_ex = exchange.replace("/", "")
     
-    artifact_key = f"rules_{clean_symbol}_{clean_tf}_{clean_ex}"
+    # PATCH-11: rules_data with profile suffix
+    artifact_key = f"rules_{clean_symbol}_{clean_tf}_{clean_ex}_{profile}"
     
     record = {
         "artifact_key": artifact_key,

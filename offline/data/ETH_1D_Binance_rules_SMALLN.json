@@ -1,0 +1,43 @@
+{
+  "version": "2026-01-17",
+  "patchlog_version": "PATCHLOG_v2.1@2026-01-10",
+  "created_at": "2026-01-17T16:20:38.341442+00:00",
+  "symbol": "ETH",
+  "tf": "1D",
+  "exchange": "Binance",
+  "meta": {
+    "N_setups": 57,
+    "min_support_abs": 3,
+    "min_edge_threshold": 0.1325,
+    "K_rules": 10,
+    "base_P_UP": 0.5088,
+    "n_rules": 1
+  },
+  "rules": [
+    {
+      "pattern": [
+        "DIV=match_down|FZ=1-3|CVDZ=LOW|CLVZ=HIGH|TD=L"
+      ],
+      "support": 5,
+      "wins_up": 0,
+      "wins_down": 5,
+      "p_up_smooth": 0.3581011351909185,
+      "p_down_smooth": 0.6418988648090815,
+      "edge_up": -0.1506707946336429,
+      "edge_down": 0.15067079463364297,
+      "tti_probs": {
+        "NEAR": 0.625,
+        "MID": 0.125,
+        "EARLY": 0.25
+      },
+      "last_state": "DIV=match_down|FZ=1-3|CVDZ=LOW|CLVZ=HIGH|TD=L"
+    }
+  ],
+  "index_by_len_last": {
+    "1": {
+      "DIV=match_down|FZ=1-3|CVDZ=LOW|CLVZ=HIGH|TD=L": [
+        0
+      ]
+    }
+  }
+}
