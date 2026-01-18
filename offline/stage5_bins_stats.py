@@ -156,7 +156,6 @@ def run_bins_stats(symbol: str, tf: str, exchange: str):
         "symbol": symbol,
         "tf": tf,
         "exchange": exchange,
-        "created_at": datetime.now(timezone.utc).isoformat(),
         "fields": bins_stats,
     }
     

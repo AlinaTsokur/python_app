@@ -1540,9 +1540,10 @@ rules_ETH_1D_Binance_SMALLN
 Патч по добавлению хвостов в основную логику:
 PATCH, который добавляет хвосты в CORE_STATE (DATA-паттерны), биннит их в bins.json, и расширяет каноническую сериализацию. Никаких новых “умных” фич, только “из полей”.
 PATCHLOG_v2.1 — запись
-[PATCH-09-CORE-TAILS] ADD CORE_STATE TAIL FEATURES (approved)
+[PATCH-09-CORE-TAILS] ADD CORE_STATE TAIL FEATURES (DEPRECATED)
 Дата: 2026-01-15
-Статус: approved
+Статус: DEPRECATED — заменён на PATCH-10 (TD-only)
+Причина: фрагментация + рост кардинальности при биннинге хвостов как Q1..Q5
 Затронуто:
 
 
@@ -1665,6 +1666,7 @@ oi_in_sens
 Если upper_tail_pct или lower_tail_pct отсутствует/NULL на свече, то: TD = N (нейтрально)
 Это не влияет на DROP (потому что хвосты не входят в обязательный CORE_STATE список).
 NaN по-прежнему запрещён общим правилом загрузки: NaN в любом числовом поле → DROP_NAN_PRESENT.
+ВАЖНО: TD=N применяется ТОЛЬКО при NULL/отсутствии; NaN в хвостах = DROP_NAN_PRESENT.
 
 3) Stage 3 — bins.json: без изменений
 НЕ добавляем новый биннимый признак tail_max_pct
@@ -1736,36 +1738,68 @@ replay/backtest и лимит 30
 artifact_key (суффикс профиля)
 9) ARTIFACT_KEY: суффикс профиля (обязательно)
 Формат ключа артефакта:
-{type}_{symbol}_{tf}_{exchange}_{profile}
+- CORE артефакты (зависят от токенизации): `{type}_{symbol}_{tf}_{exchange}_{profile}`
+- STATS артефакты (НЕ зависят от токенизации): `{type}_{symbol}_{tf}_{exchange}`
+
 Примеры:
-bins_ETH_1D_Binance_STRICT
-rules_data_ETH_1D_Binance_SMALLN
-bins_stats_ETH_1D_Binance_STRICT
-rules_stats_ETH_1D_Binance_STRICT
-calibration_ETH_1D_Binance_STRICT
-config_ETH_1D_Binance_STRICT
+- `bins_ETH_1D_Binance` (без profile — биннинг CORE до токенизации)
+- `rules_ETH_1D_Binance_STRICT` (с profile — правила зависят от токенов)
+- `rules_ETH_1D_Binance_SMALLN` (с profile)
+- `bins_stats_ETH_1D_Binance` (без profile — STATS не зависит от токенизации)
+- `rules_stats_ETH_1D_Binance` (без profile — STATS не зависит от токенизации)
+- `calibration_ETH_1D_Binance_STRICT` (с profile — калибровка по правилам)
+- `config_ETH_1D_Binance_STRICT` (с profile)
 
 
 10) Обновления по файлам (минимально)
-Stage 1 — offline/1_load_data.py
+Stage 1 — offline/stage1_loader.py
 НЕ добавлять хвосты в CORE обязательные поля
 TD вычисляется как N, если хвостовые поля отсутствуют/NULL (без DROP)
-Stage 2 — offline/2_simulate_states.py
+Stage 2 — offline/stage2_features.py
 вместо прямой сериализации вызывать tokenize_core_state(…, profile)
-Stage 3 — offline/3_build_bins.py
+Stage 3 — offline/stage3_bins.py
 без изменений (tail_max_pct не добавляем)
-Stage 4 — offline/4_mine_rules_data.py
+Stage 4 — offline/stage4_rules.py
 работает с token-строками как раньше (дедуп/индекс по новым строкам)
-Stage 5 — online/signal_detector.py
-в update_buffer строить core_state_string через tokenize_core_state
-suffix-match/индекс без изменений
-Stage 7 — offline/7_backtest_optimize.py
+Stage 5 STATS — offline/stage5_bins_stats.py
+бины для STATS метрик (без profile)
+Stage 6 STATS — offline/stage6_mine_stats.py
+майнинг STATS правил (без profile)
+Stage 7 — offline/stage7_backtest.py (TODO)
 прогон Detector с указанным profile
 calibration/config сохранять раздельно по profile
+Online — signal_detector.py (TODO)
+в update_buffer строить core_state_string через tokenize_core_state
+suffix-match/индекс без изменений
 11) Definition of Done (для этой доп-логики)
 Для одного (symbol,tf,exchange) пайплайн строит артефакты отдельно для STRICT и SMALLN (разные artifact_key).
 rules_data.json: pattern-строки содержат TD=... в обоих профилях.
 bins.json не меняется (нет tail_max_pct).
 Online Detector при одинаковом candles_seq выдаёт валидный JSON и в STRICT, и в SMALLN (direction/confidence/eta по контракту).
 Индекс rules_by_len_last строится и используется и корректно учитывает новый last_state_string (с TD).
- 
+
+[PATCH-13] STATS_RULES_PRESENCE_SEMANTIC (approved)
+Дата: 2026-01-18
+Затронуто: Stage 6 (offline/stage6_mine_stats.py), Step 1.6 spec
+Суть: Семантика support/wins для STATS rules = presence-by-setup.
+- Правило считается "сработавшим" в сетапе, если встретилось хотя бы раз на любом шаге i
+- Вклад одного сетапа в support/wins — не более 1 (повторные срабатывания игнорируются)
+- Семантика "first-hit по шагу i" для STATS rules НЕ используется (TTI/ETA по шагу не считается)
+Краткая формулировка: STATS rules: support/wins считаются по уникальным сетапам (presence), без учёта шага первого срабатывания.
+
+[PATCH-14] ARTIFACT_KEY_PROFILE_SUFFIX (approved)
+Дата: 2026-01-18
+Суть: Уточнение формата artifact_key с учётом profile.
+- Базовый формат: `{type}_{symbol}_{tf}_{exchange}`
+- Profile-dependent артефакты (добавляют `_{profile}`): `rules`, `calibration`, `config`
+- Profile-independent артефакты (БЕЗ суффикса): `bins`, `bins_stats`, `rules_stats`
+Примеры:
+- `rules_ETH_1D_Binance_STRICT` (с profile)
+- `bins_stats_ETH_1D_Binance` (без profile)
+
+[PATCH-15] SMALLN_USES_SAME_BINS (approved)
+Дата: 2026-01-18
+Суть: SMALLN профиль использует те же bins.json что и STRICT.
+- bins.json содержит Q1..Q5 квантили (одни для всех профилей)
+- SMALLN выполняет детерминированное отображение Q→ZONE после биннинга
+- Отдельные bins для SMALLN НЕ создаются

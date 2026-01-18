@@ -1,3 +1,7 @@
+# --- PYTHON VERSION REQUIREMENT ---
+# Python >= 3.11 required (for tomllib)
+# Current: Python 3.13.5
+
 # --- CORE MATHEMATICS & DATA (Strict Versions) ---
 # Critical for method='linear' in quantiles
 numpy==2.4.1

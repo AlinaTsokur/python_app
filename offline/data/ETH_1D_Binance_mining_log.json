@@ -1,0 +1,14 @@
+{
+  "timestamp": "2026-01-18T21:48:36.411431+00:00",
+  "symbol": "ETH",
+  "tf": "1D",
+  "exchange": "Binance",
+  "N_setups": 57,
+  "base_P_UP": 0.5088,
+  "min_edge_threshold": 0.1325,
+  "min_support_abs": 3,
+  "n_candidates": 4553,
+  "n_accepted": 22,
+  "rejected_by_support": 2697,
+  "rejected_by_edge": 1834
+}
