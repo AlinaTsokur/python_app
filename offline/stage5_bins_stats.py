@@ -20,20 +20,14 @@ from datetime import datetime, timezone
 from supabase import create_client, Client
 
 # Import shared STATS calculations
-from stats_calc import (
-    STATS_FIELDS, 
-    MAX_SEGMENT_LENGTH,
-    calculate_stats
-)
+try:
+    from .stats_calc import STATS_FIELDS, MAX_SEGMENT_LENGTH, calculate_stats
+except ImportError:
+    from stats_calc import STATS_FIELDS, MAX_SEGMENT_LENGTH, calculate_stats
 
 # --- CONFIG ---
 PATCHLOG_VERSION = "PATCHLOG_v2.1@2026-01-10"
 BUILD_VERSION = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-# Default target
-TARGET_SYMBOL = "ETH"
-TARGET_TF = "1D"
-TARGET_EXCHANGE = "Binance"
 
 
 def load_secrets():
@@ -51,7 +45,9 @@ def load_secrets():
 def load_clean_data(symbol: str, tf: str, exchange: str):
     """Load cleaned segments from Stage 1 output."""
     clean_symbol = symbol.replace("/", "").replace(":", "")
-    filename = f"{clean_symbol}_{tf}_{exchange}_clean.json"
+    clean_tf = tf.replace("/", "")
+    clean_ex = exchange.replace("/", "")
+    filename = f"{clean_symbol}_{clean_tf}_{clean_ex}_clean.json"
     filepath = Path(__file__).parent / "data" / filename
     
     if not filepath.exists():
@@ -113,10 +109,17 @@ def run_bins_stats(symbol: str, tf: str, exchange: str):
             # Calculate all STATS
             stats = calculate_stats(buffer)
             
-            # Add to pools (skip None values)
-            for field, value in stats.items():
-                if value is not None:
-                    pools[field].append(value)
+            # Add to pools (skip None and NaN values, iterate by STATS_FIELDS for contract)
+            for field in STATS_FIELDS:
+                value = stats.get(field)
+                if value is None:
+                    continue
+                try:
+                    if np.isnan(value):
+                        continue
+                except TypeError:
+                    pass
+                pools[field].append(value)
             
             processed_steps += 1
     
@@ -131,7 +134,8 @@ def run_bins_stats(symbol: str, tf: str, exchange: str):
         if len(values) == 0:
             raise ValueError(f"Empty pool for field '{field}' - no valid data")
         
-        quantiles = np.quantile(values, [0.20, 0.40, 0.60, 0.80], method='linear')
+        arr = np.asarray(values, dtype=float)  # Ensure float array
+        quantiles = np.quantile(arr, [0.20, 0.40, 0.60, 0.80], method='linear')
         bins_stats[field] = {
             "q20": float(quantiles[0]),
             "q40": float(quantiles[1]),
@@ -143,17 +147,21 @@ def run_bins_stats(symbol: str, tf: str, exchange: str):
     
     # 5. Build artifact
     clean_symbol = symbol.replace("/", "").replace(":", "")
+    clean_tf = tf.replace("/", "")
+    clean_ex = exchange.replace("/", "")
+    
     artifact = {
         "version": BUILD_VERSION,
         "patchlog_version": PATCHLOG_VERSION,
         "symbol": symbol,
         "tf": tf,
         "exchange": exchange,
+        "created_at": datetime.now(timezone.utc).isoformat(),
         "fields": bins_stats,
     }
     
     # 6. Save locally
-    local_filename = f"{clean_symbol}_{tf}_{exchange}_bins_stats.json"
+    local_filename = f"{clean_symbol}_{clean_tf}_{clean_ex}_bins_stats.json"
     local_path = Path(__file__).parent / "data" / local_filename
     
     with open(local_path, "w") as f:
@@ -164,7 +172,7 @@ def run_bins_stats(symbol: str, tf: str, exchange: str):
     url, key = load_secrets()
     supabase: Client = create_client(url, key)
     
-    artifact_key = f"bins_stats_{clean_symbol}_{tf}_{exchange}"
+    artifact_key = f"bins_stats_{clean_symbol}_{clean_tf}_{clean_ex}"
     
     record = {
         "artifact_key": artifact_key,
@@ -190,16 +198,20 @@ def run_bins_stats(symbol: str, tf: str, exchange: str):
     
     print(f"[OK] STATS bins built successfully.")
     
-    return True, None
+    return True, f"Создано {len(bins_stats)} STATS бинов"
 
 
 if __name__ == "__main__":
     import sys
     
-    # Allow overriding defaults via command line
-    symbol = sys.argv[1] if len(sys.argv) > 1 else TARGET_SYMBOL
-    tf = sys.argv[2] if len(sys.argv) > 2 else TARGET_TF
-    exchange = sys.argv[3] if len(sys.argv) > 3 else TARGET_EXCHANGE
+    if len(sys.argv) < 4:
+        print("Usage: python stage5_bins_stats.py <symbol> <tf> <exchange>")
+        print("Example: python stage5_bins_stats.py ETH 1D Binance")
+        sys.exit(1)
+    
+    symbol = sys.argv[1]
+    tf = sys.argv[2]
+    exchange = sys.argv[3]
     
     success, error = run_bins_stats(symbol, tf, exchange)
     
