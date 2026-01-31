@@ -25,22 +25,28 @@ st.set_page_config(
 @st.cache_resource
 def init_connection():
     try:
-        # 1. Try Streamlit Secrets
-        if "SUPABASE_URL" in st.secrets:
-            url = st.secrets["SUPABASE_URL"]
-            key = st.secrets["SUPABASE_KEY"]
-        # 2. Try OS Environment Variables (Railway)
-        else:
-            url = os.getenv("SUPABASE_URL")
-            key = os.getenv("SUPABASE_KEY")
-            
+        # 1. Try OS Environment Variables (Railway/Production) - Prioritize this!
+        url = os.getenv("SUPABASE_URL")
+        key = os.getenv("SUPABASE_KEY")
+
+        # 2. Fallback to Streamlit Secrets (Local)
         if not url or not key:
-            st.error("❌ Credentials missing! Set SUPABASE_URL and SUPABASE_KEY in secrets.toml or Environment Variables.")
+            try:
+                # Accessing st.secrets triggers file check, so we wrap it
+                if "SUPABASE_URL" in st.secrets:
+                    url = st.secrets["SUPABASE_URL"]
+                    key = st.secrets["SUPABASE_KEY"]
+            except Exception:
+                pass # secrets.toml missing, that's fine if we have env vars or handle it below
+
+        if not url or not key:
+            st.error("❌ Credentials missing! Set SUPABASE_URL and SUPABASE_KEY in Environment Variables (Railway) or .streamlit/secrets.toml (Local).")
+            # Don't stop immediately if you want to allow limited functionality, but for now strict:
             st.stop()
             
         return create_client(url, key)
     except Exception as e:
-        st.error(f"❌ Ошибка подключения к Supabase: {e}")
+        st.error(f"❌ Connection Error: {e}")
         st.stop()
 
 supabase: Client = init_connection()
