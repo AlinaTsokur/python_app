@@ -20,6 +20,7 @@ Per ТЗ v2.1 + PATCH-08/09/10:
 """
 
 import json
+import os
 import math
 import sys
 import tomllib
@@ -47,10 +48,17 @@ PRIOR_STRENGTH = 10
 # --- HELPERS ---
 
 def load_secrets():
-    """Load Supabase credentials from .streamlit/secrets.toml."""
+    """Load Supabase credentials from env vars or .streamlit/secrets.toml."""
+    # 1. Try Env Vars (Railway)
+    url = os.getenv("SUPABASE_URL")
+    key = os.getenv("SUPABASE_KEY")
+    if url and key:
+        return url, key
+
+    # 2. Try Secrets File (Local)
     secrets_path = Path(__file__).parent.parent / ".streamlit/secrets.toml"
     if not secrets_path.exists():
-        raise FileNotFoundError(f"Secrets file not found at: {secrets_path}")
+        raise FileNotFoundError(f"Secrets file not found at: {secrets_path} and no ENV vars set.")
     
     with open(secrets_path, "rb") as f:
         secrets = tomllib.load(f)
