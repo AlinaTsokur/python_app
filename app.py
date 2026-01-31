@@ -2,15 +2,14 @@ import streamlit as st
 import re
 import pandas as pd
 import uuid
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from supabase import create_client, Client
 import math
 import base64
 import os
 import diver_engine
 import levels_engine
-import altair as alt
-import parsing_engine 
+import parsing_engine
 # Reloads removed for production cleanliness
 from parsing_engine import parse_value_raw, extract, fmt_num, parse_raw_input, calculate_metrics, generate_full_report
 
@@ -26,8 +25,19 @@ st.set_page_config(
 @st.cache_resource
 def init_connection():
     try:
-        url = st.secrets["SUPABASE_URL"]
-        key = st.secrets["SUPABASE_KEY"]
+        # 1. Try Streamlit Secrets
+        if "SUPABASE_URL" in st.secrets:
+            url = st.secrets["SUPABASE_URL"]
+            key = st.secrets["SUPABASE_KEY"]
+        # 2. Try OS Environment Variables (Railway)
+        else:
+            url = os.getenv("SUPABASE_URL")
+            key = os.getenv("SUPABASE_KEY")
+            
+        if not url or not key:
+            st.error("❌ Credentials missing! Set SUPABASE_URL and SUPABASE_KEY in secrets.toml or Environment Variables.")
+            st.stop()
+            
         return create_client(url, key)
     except Exception as e:
         st.error(f"❌ Ошибка подключения к Supabase: {e}")
@@ -1544,104 +1554,7 @@ if selected_tab == "Уровни":
         full_report = "\n\n".join(report_lines)
         st.code(full_report, language="markdown")
         
-        # 2. Visualization (Candles + Levels)
-        st.subheader("📊 Визуализация (Chart)")
-        
-        # Tabs for Timeframes
-        tf_list = list(st.session_state['levels_results'].keys())
-        if tf_list:
-            tabs = st.tabs(tf_list)
-            
-            for i, tf in enumerate(tf_list):
-                with tabs[i]:
-                    lvls = st.session_state['levels_results'].get(tf, [])
-                    c_data = st.session_state.get('candles_data', {}).get(tf, [])
-                    
-                    if not c_data:
-                        st.info("Нет данных свечей для графика.")
-                        continue
-                        
-                    # Prepare DataFrames
-                    df_c = pd.DataFrame(c_data)
-                    # Ensure numeric and date
-                    # Helper to map keys if needed, but Supabase returns dicts matching columns usually
-                    # Assuming h, l, c, o, ts/time
-                    # Let's clean up column names just in case using extract_val logic or simpler mapping
-                    # Assuming standard keys exist
-                    
-                    # Normalize columns
-                    def get_col(row, keys):
-                        for k in keys:
-                            if k in row: return row[k]
-                        return 0
-                        
-                    df_c['Time'] = pd.to_datetime(df_c['ts']) if 'ts' in df_c.columns else pd.to_datetime(df_c['time'])
-                    df_c['Open'] = df_c.apply(lambda x: get_col(x, ['o', 'open']), axis=1)
-                    df_c['High'] = df_c.apply(lambda x: get_col(x, ['h', 'high']), axis=1)
-                    df_c['Low'] = df_c.apply(lambda x: get_col(x, ['l', 'low']), axis=1)
-                    df_c['Close'] = df_c.apply(lambda x: get_col(x, ['c', 'close']), axis=1)
-                    
-                    # Candle Layer
-                    base = alt.Chart(df_c).encode(
-                        x=alt.X('Time:T', title=None, axis=alt.Axis(format='%d %b %H:%M'))
-                    )
-                    
-                    rule = base.mark_rule().encode(
-                        y=alt.Y('Low:Q', title='Price (USDT)', scale=alt.Scale(zero=False)),
-                        y2='High:Q',
-                        color=alt.condition("datum.Open <= datum.Close", alt.value("#00C853"), alt.value("#D50000"))
-                    )
-                    
-                    bar = base.mark_bar().encode(
-                        y='Open:Q',
-                        y2='Close:Q',
-                        color=alt.condition("datum.Open <= datum.Close", alt.value("#00C853"), alt.value("#D50000")),
-                        tooltip=['Time', 'Open', 'High', 'Low', 'Close']
-                    )
-                    
-                    chart_candles = rule + bar
-                    
-                    # Levels Layer
-                    if lvls:
-                        df_req_l = []
-                        for l in lvls:
-                            df_req_l.append({
-                                "Price": l['mid'],
-                                "Type": "R" if l['kind'] == 'R' else "S",
-                                "Touches": l['touches']
-                            })
-                        df_l = pd.DataFrame(df_req_l)
-                        
-                        # Use a dummy base for levels to allow full width rules?
-                        # Altair rules without X encoding span the width.
-                        # But we need to layer them over time axis.
-                        # Actually, if we just use 'y' encoding on a separate data source, it should work as annotation lines.
-                        
-                        base_l = alt.Chart(df_l).encode(
-                            y=alt.Y('Price:Q')
-                        )
-                        
-                        lvl_rules = base_l.mark_rule().encode(
-                            color=alt.Color('Type:N', scale=alt.Scale(domain=['S', 'R'], range=['green', 'red']), legend=None),
-                            size=alt.Size('Touches:Q', scale=alt.Scale(range=[1, 3]), legend=None),
-                            opacity=alt.value(0.7),
-                            tooltip=['Type', 'Price', 'Touches']
-                        )
-                        
-                        lvl_text = base_l.mark_text(align='left', dx=2, dy=-5).encode(
-                            text=alt.Text('Price', format=".2f"),
-                            color=alt.value('white') # Assuming dark mode
-                        )
-                        
-                        final_chart = (chart_candles + lvl_rules + lvl_text).properties(
-                            title=f"{tf} Chart with Levels",
-                            width='container',
-                            height=600
-                        ).interactive()
-                        
-                        st.altair_chart(final_chart, use_container_width=True)
-                    else:
-                        st.altair_chart(chart_candles.properties(width='container', height=600).interactive(), use_container_width=True)
+
 
         
         # Details Expander (Hidden, Debug)
