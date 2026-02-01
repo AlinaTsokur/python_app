@@ -1,10 +1,7 @@
 import streamlit as st
-import re
 import pandas as pd
-import uuid
-from datetime import datetime, time, timedelta
+from datetime import datetime, timedelta
 from supabase import create_client, Client
-import math
 import base64
 import os
 import diver_engine
@@ -15,6 +12,7 @@ from parsing_engine import parse_value_raw, extract, fmt_num, parse_raw_input, c
 from core.report_generator import generate_xray, generate_composite, generate_full_report, generate_composite_report
 from ui.tabs import tab_reports
 from ui.tabs import tab_candles
+from ui.tabs import tab_diver
 
 # --- Настройка страницы ---
 st.set_page_config(
@@ -146,18 +144,9 @@ else:
     st.title("🖤 VANTA")
 
 # --- NAVIGATION LOGIC ---
-import importlib
 import batch_parser
-importlib.reload(batch_parser) # Force reload to apply fixes immediately
-
-# Dynamic Import of Offline modules
 from offline import stage1_loader, stage2_features, stage3_bins, stage4_rules, stage5_bins_stats, stage6_mine_stats
-importlib.reload(stage1_loader)
-importlib.reload(stage2_features)
-importlib.reload(stage3_bins)
-importlib.reload(stage4_rules)
-importlib.reload(stage5_bins_stats)
-importlib.reload(stage6_mine_stats)
+
 
 TABS = ["Отчеты", "Свечи", "Дивер", "Уровни", "Лаборатория", "Обучение"]
 
@@ -186,7 +175,7 @@ selected_tab = st.radio(
     on_change=on_tab_change
 )
 
-# ... (Previous Tabs Code) ...
+# === HELPER FUNCTIONS ===
 
 def _display_found_rules(symbol, tf, exchange):
     """Display found rules in a nice summary table."""
@@ -379,401 +368,7 @@ if selected_tab == "Свечи":
 
 
 if selected_tab == "Дивер":
-    # 1. Mode Selection
-    mode = st.radio("Источник данных", ["Выбрать из базы данных", "Ручной ввод"], horizontal=True, label_visibility="collapsed")
-    
-    selected_metrics = None
-    
-    if "Ручной" in mode:
-        raw_text = st.text_area("Вставьте данные свечи", height=150, label_visibility="collapsed", placeholder="Вставьте свечи здесь...", key="manual_candle_input")
-        
-        # Paw Button
-        c_paw, _ = st.columns([1, 10])
-        with c_paw:
-            if st.button("🐾", key="btn_manual_paw", type="primary"):
-                if raw_text:
-                    # --- REFACTORED CALL ---
-                    # We reuse the same robust function used in Tab 1
-                    try:
-                        # Use current time as default, similar to Tab 1
-                        final_save_list, orphan_errors = processor.process_batch(raw_text)
-                        
-                        if orphan_errors:
-                            st.error("\n".join(orphan_errors))
-                        
-                        if final_save_list:
-                            # In Manual Mode we usually expect 1 candle.
-                            # We take the first valid Result (which might be a Composite or Single)
-                            m = final_save_list[0]
-                            st.session_state['manual_diver_candle'] = m
-                            st.rerun()
-                        elif not orphan_errors:
-                            st.warning("Не удалось распознать данные. Проверьте формат.")
-                            
-                    except Exception as e:
-                        st.error(f"Системная ошибка: {e}")
-        
-        # Display Manual Result (Persisted)
-        if st.session_state.get('manual_diver_candle'):
-            
-            # Split Screen Logic
-            # c_left takes 50%, c_right takes 50%
-            c_left, c_right = st.columns([1, 1])
-            
-            # --- LEFT HALF: EXPANDER ---
-            with c_left:
-                m_data = st.session_state['manual_diver_candle']
-                try:
-                    ts_obj = datetime.fromisoformat(m_data.get('ts'))
-                    ts_str = ts_obj.strftime('%d.%m.%Y %H:%M')
-                except:
-                    ts_str = str(m_data.get('ts', '')).replace('T', ' ')[:16]
-                
-                warn_icon = " ⚠️" if m_data.get('missing_fields') else ""
-                label = f"{ts_str} · {m_data.get('exchange')} · {m_data.get('symbol_clean')} · {m_data.get('tf')} · O {fmt_num(m_data.get('open'))}{warn_icon}"
-                
-                with st.expander(label, expanded=False):
-                    if m_data.get('missing_fields'):
-                         st.warning(f"Не найдены поля: {', '.join(m_data['missing_fields'])}")
-                         
-                    # === DYNAMIC TABS (For Manual Mode) ===
-                    if m_data.get('x_ray_composite'):
-                        t_xray, t_comp = st.tabs(["X-RAY", "⚡️ COMPOSITE"])
-                        with t_xray:
-                             if m_data.get('x_ray'): st.code(m_data['x_ray'], language="yaml")
-                        with t_comp:
-                             st.code(m_data['x_ray_composite'], language="yaml")
-                    else:
-                        if m_data.get('x_ray'):
-                             st.code(m_data['x_ray'], language="yaml")
-
-            # --- RIGHT HALF: CONTROLS ---
-            with c_right:
-                mk_base = "manu_diver"
-                
-                # Align Zone, Action, Button on one line in this right half
-                r1, r2, r3 = st.columns([2, 2, 1.5], gap="small")
-                
-                with r1:
-                    m_zone = st.selectbox(
-                        "📍 Зона", 
-                        ["🌪 В воздухе", "🟢 Поддержка", "🔴 Сопротивление"],
-                        key=f"zone_{mk_base}",
-                        label_visibility="collapsed",
-                        index=None,
-                        placeholder="📍 Зона"
-                    )
-                # Check disable condition
-                is_air_m = (m_zone == "🌪 В воздухе")
-                
-                with r2:
-                    m_action = st.selectbox(
-                        "⚡️ Действие", 
-                        [
-                            "🛡 Удержание",
-                            "⚔️ Пробой",
-                            "🎣 Л.Пробой",
-                            "🪜 На границе",
-                            "🕯 Тело на уровне"
-                        ],
-                        key=f"act_{mk_base}",
-                        label_visibility="collapsed",
-                        index=None,
-                        placeholder="⚡️ Действие" if not is_air_m else "⛔️ Недоступно в воздухе",
-                        disabled=is_air_m
-                    )
-                with r3:
-                    if st.button("🔮 Анализ", key=f"btn_{mk_base}", type="primary", use_container_width=True):
-                         # Mapping Logic (clean internal codes)
-                        z_map = {
-                            "🌪 В воздухе": "Air",
-                            "🟢 Поддержка": "Support",
-                            "🔴 Сопротивление": "Resistance"
-                        }
-
-                        
-                        a_map = {
-                            "🛡 Удержание": "AT_EDGE",
-                            "⚔️ Пробой": "BREAK",
-                            "🎣 Л.Пробой": "PROBE",
-                            "🪜 На границе": "AT_EDGE_BORDERLINE",
-                            "🕯 Тело на уровне": "AT_EDGE_TAIL"
-                        }
-                        
-                        zone_code = z_map.get(m_zone)
-                        action_code = a_map.get(m_action)
-                        
-                        # Validate (Action is optional if Zone is Air)
-                        if not zone_code or (not action_code and zone_code != "Air"):
-                            st.toast("⚠️ Выберите Зону и Действие!", icon="⚠️")
-                        else:
-                            # If Air, action_code might be None, logic handles it
-                            report = diver_engine.run_expert_analysis(m_data, zone_code, action_code)
-                            st.session_state['manual_diver_report'] = report
-                            st.rerun()
-            
-            # --- BOTTOM: REPORT (Full Width) ---
-            if st.session_state.get('manual_diver_report'):
-                # Report takes the LEFT HALF width to match the expander width?
-                # User said: "Left field with report..."
-                # Wait: "Left field with report and right... place 3 other forms".
-                # This implies the Report should also be in the Left Half?
-                # Or maybe user meant the Expander IS the report.
-                # "Left field with report [Expander?] and right... place 3 buttons".
-                # Where does the RESULT go?
-                # Usually results go below.
-                # Let's put the result in the Left Half below the expander.
-                
-                with c_left:
-                    st.code(st.session_state['manual_diver_report'], language="text")
-
-    else: # DB Mode
-        # Single Row for Filters + Selector
-        # Ratio: TF (small), Dates (med), Selector (wide)
-        c_tf, c_date, c_sel = st.columns([1, 1.5, 3], gap="small")
-        
-        with c_tf:
-            all_tfs = ["1m", "5m", "15m", "1h", "4h", "1d", "1w"]
-            filter_tfs = st.multiselect(
-                "TF", 
-                all_tfs, 
-                default=[], 
-                placeholder="TF", 
-                label_visibility="collapsed",
-                key="diver_db_tf_filter"
-            )
-            
-        with c_date:
-            filter_dates = st.date_input(
-                "Период", 
-                value=[], 
-                label_visibility="collapsed",
-                key="diver_db_date_filter"
-            )
-        
-        # Parse Dates & Load
-        d_start, d_end = None, None
-        if len(filter_dates) == 2:
-            d_start, d_end = filter_dates
-        elif len(filter_dates) == 1:
-             d_start = filter_dates[0]
-             
-        db_df = db.load_candles(limit=500, start_date=d_start, end_date=d_end, tfs=filter_tfs)
-        
-
-        selected_metrics = None
-        
-        with c_sel:
-            if not db_df.empty:
-                # Create label map
-                options_map = {}
-                for idx, row in db_df.iterrows():
-                    try:
-                        ts_str = str(row['ts']).replace('T', ' ')[:16]
-                        label = f"{ts_str} | {row.get('symbol_clean')} | {row.get('tf')} | O: {row.get('open')}"
-                        options_map[label] = row.to_dict()
-                    except:
-                        continue
-                
-                sel_label = st.selectbox(
-                    "Выберите свечу", 
-                    list(options_map.keys()),
-                    index=None,
-                    placeholder="Выберите свечу для анализа",
-                    label_visibility="collapsed"
-                )
-                
-                if sel_label:
-                    # 1. Get raw DB data
-                    raw_db_metrics = options_map[sel_label]
-                    
-                    # 2. Restore missing 'tf_sens' from Config (since DB column might be missing)
-                    # Use lighter update if possible, but calculate_metrics is safest
-                    config = load_configurations() 
-                    selected_metrics = calculate_metrics(raw_db_metrics, config)
-            else:
-                st.markdown(
-                    """
-                    <div style="
-                        background-color: rgba(100, 181, 246, 0.1); 
-                        color: #64B5F6;
-                        padding: 8px 12px; 
-                        border-radius: 4px; 
-                        width: fit-content;
-                        font-size: 14px;
-                        border: 1px solid rgba(100, 181, 246, 0.2);
-                    ">
-                        ℹ️ Нет данных
-                    </div>
-                    """, 
-                    unsafe_allow_html=True
-                )
-
-        if selected_metrics:
-            # COPY OF MANUAL INPUT LAYOUT
-            m_data = selected_metrics
-            
-            # Split Screen Logic
-            d_left, d_right = st.columns([1, 1])
-            
-            # --- LEFT HALF: EXPANDER + REPORT ---
-            with d_left:
-                try:
-                    ts_obj = datetime.fromisoformat(str(m_data.get('ts')))
-                    ts_str = ts_obj.strftime('%d.%m.%Y %H:%M')
-                except:
-                    ts_str = str(m_data.get('ts', '')).replace('T', ' ')[:16]
-                
-                # Check missing fields? DB usually has them or not.
-                missing_f = m_data.get('missing_fields', [])
-                warn_icon = " ⚠️" if missing_f else ""
-                
-                label = f"{ts_str} · {m_data.get('exchange')} · {m_data.get('symbol_clean')} · {m_data.get('tf')} · O {m_data.get('open')}{warn_icon}"
-                
-                with st.expander(label, expanded=False):
-                    # Tabs logic
-                    xray_val = m_data.get('x_ray')
-                    comp_val = m_data.get('x_ray_composite')
-                    
-                    if comp_val:
-                        t_xray, t_comp = st.tabs(["X-RAY", "⚡️ COMPOSITE"])
-                        with t_xray:
-                             if xray_val: st.code(xray_val, language="yaml")
-                        with t_comp:
-                             st.code(comp_val, language="yaml")
-                    else:
-                        if xray_val:
-                             st.code(xray_val, language="yaml")
-                             
-                # Show Report below expander
-                if st.session_state.get('db_diver_report'):
-                    report_txt = st.session_state['db_diver_report']
-                    st.code(report_txt, language="text")
-                    
-                    if st.button("💾 Сохранить отчет в БД", key="save_diver_db_btn"):
-                        c_id = m_data.get('id')
-                        if c_id:
-                            try:
-                                supabase.table('candles').update({
-                                    'report_diver': report_txt
-                                }).eq('id', c_id).execute()
-                                st.toast("Отчет сохранен в БД! ✅", icon="✅")
-                            except Exception as e:
-                                st.error(f"Ошибка сохранения: {e}")
-                        else:
-                            st.warning("Не найден ID свечи для сохранения.")
-
-            # --- RIGHT HALF: CONTROLS ---
-            with d_right:
-                mk_base = "db_diver"
-                
-                # New Layout: [Zone (1.2), Action (1.2), Analyze (0.7), ITB (0.7)]
-                r1, r2, r3, r4 = st.columns([1.2, 1.2, 0.7, 0.7], gap="small")
-                
-                with r1:
-                    d_zone = st.selectbox(
-                        "📍 Зона", 
-                        ["🌪 В воздухе", "🟢 Поддержка", "🔴 Сопротивление"],
-                        key=f"zone_{mk_base}",
-                        label_visibility="collapsed",
-                        index=None,
-                        placeholder="📍 Зона"
-                    )
-                # Check disable condition
-                is_air_d = (d_zone == "🌪 В воздухе")
-                
-                with r2:
-                    d_action = st.selectbox(
-                        "⚡️ Действие", 
-                        [
-                            "🛡 Удержание",
-                            "⚔️ Пробой",
-                            "🎣 Л.Пробой",
-                            "🪜 На границе",
-                            "🕯 Тело на уровне"
-                        ],
-                        key=f"act_{mk_base}",
-                        label_visibility="collapsed",
-                        index=None,
-                        placeholder="⚡️ Действие" if not is_air_d else "⛔️ Недоступно в воздухе",
-                        disabled=is_air_d
-                    )
-                # Define Maps (Shared Scope)
-                z_map = {
-                    "🌪 В воздухе": "Air",
-                    "🟢 Поддержка": "Support",
-                    "🔴 Сопротивление": "Resistance"
-                }
-                
-                a_map = {
-                    "🛡 Удержание": "AT_EDGE",
-                    "⚔️ Пробой": "BREAK",
-                    "🎣 Л.Пробой": "PROBE",
-                    "🪜 На границе": "AT_EDGE_BORDERLINE",
-                    "🕯 Тело на уровне": "AT_EDGE_TAIL"
-                }
-
-                with r3:
-                    if st.button("🔮 Анализ", key=f"btn_{mk_base}", type="primary", use_container_width=True):
-                        
-                        zone_code = z_map.get(d_zone)
-                        action_code = a_map.get(d_action)
-                        
-                        # Validate (Action is optional if Zone is Air)
-                        if not zone_code or (not action_code and zone_code != "Air"):
-                            st.toast("⚠️ Выберите Зону и Действие!", icon="⚠️")
-                        else:
-                            report = diver_engine.run_expert_analysis(selected_metrics, zone_code, action_code)
-                            st.session_state['db_diver_report'] = report
-                            st.rerun()
-
-                with r4:
-                    if st.button("🛠 ИТБ", type="secondary", key="btn_toggle_itb", use_container_width=True):
-                        st.session_state['show_itb_form'] = not st.session_state.get('show_itb_form', False)
-
-                # --- ITB FORM RENDER ---
-                if st.session_state.get('show_itb_form'):
-                     itb_ph = f"Вставьте данные нарезки ({str(m_data.get('ts'))})..."
-                     itb_text = st.text_area("Данные нарезки", height=200, key="itb_input_area", label_visibility="collapsed", placeholder=itb_ph)
-                     
-                     if st.button("🚀 Запустить ITB Анализ", type="primary", key="btn_run_itb_real"):
-                            if not itb_text.strip():
-                                st.error("Пустой ввод!")
-                            else:
-                                slices = []
-                                config = load_configurations()
-                                lines = itb_text.strip().split('\n')
-                                is_valid = True
-                                
-                                for i, line in enumerate(lines):
-                                    if not line.strip(): continue
-                                    try:
-                                        raw_s = parse_raw_input(line)
-                                        met_s = calculate_metrics(raw_s, config)
-                                        slices.append(met_s)
-                                    except Exception as e:
-                                        st.error(f"Ошибка в строке {i+1}: {e}")
-                                        is_valid = False
-                                        break
-                                
-                                if is_valid:
-                                    try:
-                                        # Inject Base Analysis
-                                        z_code = z_map.get(d_zone)
-                                        a_code = a_map.get(d_action)
-                                        if z_code and (a_code or z_code == "Air"):
-                                            base_cls, base_prob = diver_engine.get_base_analysis(m_data, z_code, a_code)
-                                            m_data['cls'] = base_cls
-                                            m_data['prob_final'] = base_prob
-                                        
-                                        res_itb = diver_engine.run_intrabar_analysis(m_data, slices)
-                                        st.session_state['itb_result'] = res_itb
-                                    except Exception as e:
-                                        st.error(f"Ошибка движка ITB: {e}")
-                
-                # Show Result Persistent
-                if st.session_state.get('itb_result'):
-                    st.code(st.session_state['itb_result'], language="text")
+    tab_diver.render(db, processor, load_configurations, supabase)
 
 
 # ==============================================================================
@@ -821,7 +416,6 @@ if selected_tab == "Уровни":
                         
                         # Data Collection
                         levels_results = {}
-                        candles_data = {} # Store for visualization
                         
                         for tf in selected_tfs_lvl:
                              # Build Query on unified 'candles' table
@@ -857,10 +451,8 @@ if selected_tab == "Уровни":
                                  # Separate H/L clustering already done inside
                                  
                                  levels_results[tf.upper()] = lvls
-                                 candles_data[tf.upper()] = candles # Store for Viz
                         
                         st.session_state['levels_results'] = levels_results
-                        st.session_state['candles_data'] = candles_data
                             
                 except Exception as e:
                     st.error(f"Ошибка: {e}")
@@ -890,7 +482,7 @@ if selected_tab == "Уровни":
         
 
         # Details Expander (Hidden, Debug)
-        with st.expander("hidden details (debug)"): 
+        with st.expander("🔍 Детали (отладка)", expanded=False):
             for tf, lvls in st.session_state['levels_results'].items():
                 st.markdown(f"**{tf} Debug Data:**")
                 if lvls:
