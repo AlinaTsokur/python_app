@@ -52,6 +52,10 @@ def init_connection():
 
 supabase: Client = init_connection()
 
+# --- 🗄️ Database Manager Instance ---
+from core.db_manager import DatabaseManager
+db = DatabaseManager(supabase)
+
 # --- 🎨 CSS: PREMIUM DESIGN ---
 import styles
 styles.apply_styles(st)
@@ -99,172 +103,8 @@ def load_configurations():
 # --- 🧠 ЯДРО: 2. CALCULATED METRICS ---
 # MOVED TO parsing_engine.py
 
-# --- 🔄 СЛИЯНИЕ С БД (Merge-on-Parse) ---
-def fetch_and_merge_db(batch_data, config):
-    """
-    1. Ищет существующие свечи в БД по (exchange, symbol, tf, ts).
-    2. Объединяет новые данные с существующими.
-    """
-    if not batch_data: return []
-    
-    # Helper to normalize key for reliable matching
-    def get_merge_key(ex, sym, tf, ts):
-        # Normalize TS: "2025-12-10T12:00:00" -> "2025-12-10 12:00"
-        # Handles various ISO formats and timezone offsets by taking first 16 chars
-        clean_ts = str(ts).replace('T', ' ')[:16]
-        return (ex, sym, tf, clean_ts)
-
-    # 1. Группировка для оптимизации запросов
-    # Нужно запросить диапазоны времени для каждого тикера
-    groups = {} # (ex, sym, tf) -> [ts_list]
-    for row in batch_data:
-        key = (row.get('exchange'), row.get('symbol_clean'), row.get('tf'))
-        if key not in groups: groups[key] = []
-        groups[key].append(row.get('ts'))
-        
-    db_map = {} # (ex, sym, tf, ts) -> db_row
-    
-    # 2. Batch Fetching
-    try:
-        for (ex, sym, tf), ts_list in groups.items():
-            if not ts_list: continue
-            min_ts = min(ts_list)
-            max_ts = max(ts_list)
-            
-            # Запрос к БД: exchange + symbol + tf + диапазон времени
-            res = supabase.table('candles')\
-                .select("*")\
-                .eq('exchange', ex)\
-                .eq('symbol_clean', sym)\
-                .eq('tf', tf)\
-                .gte('ts', min_ts)\
-                .lte('ts', max_ts)\
-                .execute()
-                
-            if res.data:
-                for db_row in res.data:
-                     # Use normalized key
-                    k = get_merge_key(db_row.get('exchange'), db_row.get('symbol_clean'), db_row.get('tf'), db_row.get('ts'))
-                    db_map[k] = db_row
-                    
-    except Exception as e:
-        st.error(f"Ошибка получения данных из БД для слияния: {e}")
-        pass 
-
-    # 3. Merging
-    merged_batch = []
-    for new_row in batch_data:
-        # Use normalized key
-        k = get_merge_key(new_row.get('exchange'), new_row.get('symbol_clean'), new_row.get('tf'), new_row.get('ts'))
-        existing = db_map.get(k)
-        
-        if existing:
-            # Стратегия слияния:
-            combined = existing.copy()
-            
-            for key, val in new_row.items():
-                # Обновляем, если в базе пусто
-                existing_val = combined.get(key)
-                is_existing_empty = (existing_val is None) or (isinstance(existing_val, (int, float)) and existing_val == 0)
-                
-                if is_existing_empty:
-                    combined[key] = val
-            
-            merged_batch.append(combined)
-        else:
-            merged_batch.append(new_row)
-            
-    return merged_batch
-
 # --- 💾 БД ---
-def save_candles_batch(candles_data):
-    if not candles_data: return True
-    
-    # Deep copy to allow modification during retries
-    current_data = [c.copy() for c in candles_data]
-    
-    # Ensure note exists and remove ID to rely on composite key upsert
-    for row in current_data:
-        if 'note' not in row: row['note'] = ""
-        # Remove 'id' to prevent "null value in column id" error during mixed batch upserts
-        row.pop('id', None)
-            
-    # Attempt loop
-    attempt = 0
-    max_attempts = 20 # Enough for many missing metrics
-    dropped_columns = []
-    
-    while attempt < max_attempts:
-        try:
-            # Upsert WITHOUT ignore_duplicates to allow UPDATES
-            res = supabase.table('candles').upsert(
-                current_data, 
-                on_conflict='exchange,symbol_clean,tf,ts'
-            ).execute()
-            
-            return True
-        except Exception as e:
-            err_str = str(e)
-            # Detect column error (PGRST204)
-            match = re.search(r"Could not find the '(\w+)' column", err_str)
-            if match:
-                bad_col = match.group(1)
-                if bad_col not in dropped_columns:
-                    dropped_columns.append(bad_col)
-                    # Remove this column from all rows
-                    for row in current_data:
-                        row.pop(bad_col, None)
-                else:
-                     # Loop detected?
-                     st.error(f"Зацикливание на колонке {bad_col}: {e}")
-                     return False
-                attempt += 1
-            else:
-                # Other error
-                st.error(f"Ошибка сохранения в БД: {e}")
-                return False
-                
-    st.error("Не удалось сохранить после нескольких попыток удаления лишних полей.")
-    return False
-
-def load_candles_db(limit=100, start_date=None, end_date=None, tfs=None):
-    try:
-        query = supabase.table('candles').select("*").order('ts', desc=True)
-        
-        if start_date:
-            query = query.gte('ts', start_date.isoformat())
-        if end_date:
-            # End date inclusive (until end of day)
-            end_dt = datetime.combine(end_date, time(23, 59, 59))
-            query = query.lte('ts', end_dt.isoformat())
-            
-        if tfs and len(tfs) > 0:
-            # Case-insensitive filter hack: add both cases
-            tfs_extended = list(set(tfs + [t.upper() for t in tfs] + [t.lower() for t in tfs]))
-            query = query.in_('tf', tfs_extended)
-            
-        res = query.limit(limit).execute()
-        return pd.DataFrame(res.data) if res.data else pd.DataFrame()
-    except Exception as e:
-        st.error(f"Ошибка чтения БД: {e}")
-        return pd.DataFrame()
-
-def delete_candles_db(ids):
-    try:
-        supabase.table('candles').delete().in_('id', ids).execute()
-        return True
-    except Exception as e:
-        st.error(f"Ошибка удаления: {e}")
-        return False
-
-def update_candle_db(id, changes):
-    try:
-        supabase.table('candles').update(changes).eq('id', id).execute()
-        return True
-    except Exception as e:
-        st.error(f"Ошибка обновления: {e}")
-        return False
-
+# MOVED TO core/db_manager.py (DatabaseManager class)
 
 
 # --- HELPER: CENTRALIZED BATCH PROCESSING (Refactored) ---
@@ -323,7 +163,7 @@ def process_raw_text_batch(raw_text):
     local_batch = list(merged_groups.values())
     
     # 3. DB Enrichment
-    final_batch_list = fetch_and_merge_db(local_batch, config)
+    final_batch_list = db.fetch_and_merge(local_batch)
     
     # 4. Metric Calculation & X-RAY
     temp_all_candles = []
@@ -724,7 +564,7 @@ if selected_tab == "Отчеты":
         # This ensures it captures the FRESH state after "Parse" is clicked
         with col_save:
              if st.button(f"💾 Сохранить {len(batch)}", type="secondary", key="save_btn_top"):
-                if save_candles_batch(batch):
+                if db.save_candles_batch(batch):
                     st.toast("Успешно сохранено!", icon="💾")
                     st.cache_data.clear()
         
@@ -780,7 +620,7 @@ if selected_tab == "Свечи":
         limit_rows = st.number_input("Limit", value=100, min_value=1, step=50, label_visibility="collapsed")
 
     # 1. Load Data
-    df = load_candles_db(limit=limit_rows, start_date=start_d, end_date=end_d, tfs=selected_tfs)
+    df = db.load_candles(limit=limit_rows, start_date=start_d, end_date=end_d, tfs=selected_tfs)
 
     if not df.empty:
         if 'note' not in df.columns: df['note'] = ""
@@ -803,7 +643,7 @@ if selected_tab == "Свечи":
                              valid_changes = {k: v for k, v in changes.items() if k != 'delete'}
                              if valid_changes:
                                  row_id = df.iloc[idx]['id']
-                                 update_candle_db(row_id, valid_changes)
+                                 db.update_candle(row_id, valid_changes)
                                  count += 1
                          if count > 0:
                              st.toast(f"✅ Обновлено {count} свечей")
@@ -836,7 +676,7 @@ if selected_tab == "Свечи":
                 ids_to_del = list(set(ids_to_del))
 
                 if ids_to_del:
-                    if delete_candles_db(ids_to_del):
+                    if db.delete_candles(ids_to_del):
                         st.toast(f"Удалено {len(ids_to_del)} записей!")
                         st.cache_data.clear()
                         st.rerun()
@@ -1066,7 +906,7 @@ if selected_tab == "Дивер":
         elif len(filter_dates) == 1:
              d_start = filter_dates[0]
              
-        db_df = load_candles_db(limit=500, start_date=d_start, end_date=d_end, tfs=filter_tfs)
+        db_df = db.load_candles(limit=500, start_date=d_start, end_date=d_end, tfs=filter_tfs)
         
 
         selected_metrics = None
