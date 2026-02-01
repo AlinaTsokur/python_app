@@ -13,6 +13,7 @@ import parsing_engine
 # Reloads removed for production cleanliness
 from parsing_engine import parse_value_raw, extract, fmt_num, parse_raw_input, calculate_metrics
 from core.report_generator import generate_xray, generate_composite, generate_full_report, generate_composite_report
+from ui.tabs import tab_reports
 
 # --- Настройка страницы ---
 st.set_page_config(
@@ -369,74 +370,8 @@ if selected_tab == "Обучение":
                      st.error(str(e))
 
 if selected_tab == "Отчеты":
-    # TAB 1 CONTENT
-    input_text = st.text_area("Вставьте данные свечи", height=150, label_visibility="collapsed", placeholder="Вставьте свечи здесь...")
-    
-    # Скрываем выбор даты/времени, берем текущие
-    user_date = datetime.now().date()
-    user_time = datetime.now().time()
-    
-    col_action, col_save, _ = st.columns([1, 4, 20], gap="small")
-    
-    with col_action:
-        process = st.button("🐾", type="primary")
+    tab_reports.render(db, processor)
 
-    # Save button will be rendered into col_save downstream (after processing)
-
-    if process and input_text:
-        # --- REFACTORED CALL ---
-        final_save_list, orphan_errors = processor.process_batch(input_text)
-        
-        # Save to session (Validation Mode)
-        st.session_state.processed_batch = final_save_list
-        st.session_state.validation_errors = orphan_errors
-        st.rerun()
-
-    if 'validation_errors' in st.session_state and st.session_state.validation_errors:
-        st.error("⛔️ ОШИБКА ВАЛИДАЦИИ КОМПОЗИТА")
-        st.warning("Обнаружены данные других бирж, которые не совпали с Binance. Сохранение заблокировано.")
-        for msg in st.session_state.validation_errors:
-            st.code(msg, language="text")
-            
-    if 'processed_batch' in st.session_state and st.session_state.processed_batch:
-        batch = st.session_state.processed_batch
-        
-        # Deferred Render: Save button in the top column
-        # This ensures it captures the FRESH state after "Parse" is clicked
-        with col_save:
-             if st.button(f"💾 Сохранить {len(batch)}", type="secondary", key="save_btn_top"):
-                if db.save_candles_batch(batch):
-                    st.toast("Успешно сохранено!", icon="💾")
-                    st.cache_data.clear()
-        
-        # Clear logic previously handled inside the big block, now we iterate
-        for idx, full_data in enumerate(batch):
-            # Prepare Label
-            try:
-                ts_obj = datetime.fromisoformat(full_data['ts'])
-                ts_str = ts_obj.strftime('%d.%m.%Y %H:%M')
-            except:
-                ts_str = str(full_data.get('ts'))
-            
-            # Minimalist Header in Expander Label
-            warn_icon = " ⚠️" if full_data.get('missing_fields') else ""
-            label = f"{ts_str} · {full_data.get('exchange')} · {full_data.get('symbol_clean')} · {full_data.get('tf')} · O {fmt_num(full_data.get('open'))}{warn_icon}"            
-            with st.expander(label):
-                if full_data.get('missing_fields'):
-                    st.warning(f"⚠️ Отсутствуют данные: {', '.join(full_data['missing_fields'])}.\nЗначения заменены на 0, чтобы расчеты не упали.")
-                
-                with st.container(height=300):
-                    # === DYNAMIC TABS (Option 1) ===
-                    if full_data.get('x_ray_composite'):
-                        t_xray, t_comp = st.tabs(["X-RAY", "⚡️ COMPOSITE"])
-                        with t_xray:
-                             if full_data.get('x_ray'): st.code(full_data['x_ray'], language="yaml")
-                        with t_comp:
-                             st.code(full_data['x_ray_composite'], language="yaml")
-                    else:
-                        # Standard View
-                        if full_data.get('x_ray'):
-                             st.code(full_data['x_ray'], language="yaml")
 
 if selected_tab == "Свечи":
     
