@@ -323,10 +323,10 @@ def generate_composite_report(candles_list):
 
         if not valid_candles: return None
         
-        subset_vol = sum(get_val(c, 'volume') for c in valid_candles)
+        subset_vol = sum((get_val(c, 'volume') or 0) for c in valid_candles)
         if subset_vol == 0: return None
         
-        return sum(get_val(c, key) * get_val(c, 'volume') for c in valid_candles) / subset_vol
+        return sum(get_val(c, key) * (get_val(c, 'volume') or 0) for c in valid_candles) / subset_vol
 
     # 3. Расчет метрик
     comp = {
@@ -499,11 +499,12 @@ def process_raw_text_batch(raw_text):
 
     # 5. Composite Analysis (Strict Mode)
     final_save_list = []
-    orphan_errors = [] 
+    composite_errors = [] 
     
     def get_comp_key(r):
         ts = str(r.get('ts', '')).replace('T', ' ')[:16]
         sym = str(r.get('symbol_clean', '')).upper()
+        if sym.endswith('USDT'): sym = sym.replace('USDT', '')
         tf = str(r.get('tf', '')).upper()
         return (ts, sym, tf)
 
@@ -552,7 +553,13 @@ def process_raw_text_batch(raw_text):
                     min_diff = curr_diff
                     best_match = target
             
+            # Improved Error Message (AI Audit #9)
             err_msg = f"• {orphan.get('exchange')} {o_sym} {o_ts}"
+            
+            # List all members of this orphan group for clarity
+            members_str = ", ".join([f"{m.get('exchange')}" for m in grp])
+            err_msg += f" [Группа: {members_str}]"
+            
             if best_match:
                 reasons = []
                 bm_ts = get_comp_key(best_match)[0]
@@ -567,12 +574,11 @@ def process_raw_text_batch(raw_text):
             else:
                 err_msg += " -> Не найдено пары на Binance (проверьте все параметры)"
             
-            orphan_errors.append(err_msg)
+            composite_errors.append(err_msg)
             
-        # If orphans, we do NOT return valid list? 
-        # Tab 1 logic: "st.session_state.processed_batch = []" if orphans exist.
-        # We adhere to this strict logic.
-        return [], orphan_errors
+        # Combine errors: Parsing Errors + Composite Errors
+        total_errors = orphan_errors + composite_errors
+        return [], total_errors
         
     else:
         # No orphans - process valid groups
@@ -583,24 +589,14 @@ def process_raw_text_batch(raw_text):
             if target_candle:
                 unique_exchanges = set(r['exchange'] for r in group)
                 if len(unique_exchanges) >= 3:
-                    # COMPOSITE REPORT using ALL group members
-                    # Tab 1 passed 'group' NOT 'members' (variable naming)
-                    # And likely function expects list of candles.
-                    # We need to check generate_composite_report signature.
-                    # Previous code: generate_composite_report(group) - only 1 arg?
-                    # Let's check.
-                    # Assuming it takes list.
-                    
-                    # Wait, Tab 3 logic had different call?
-                    # No, I implemented detailed valid logic from Tab 1.
-                    
-                    # We pass 'group' to generate_composite_report
+                     # Calculate Composite for this group
                     comp_report = generate_composite_report(group)
-                    target_candle['x_ray_composite'] = comp_report # Assign to Composite field
+                    target_candle['x_ray_composite'] = comp_report 
                 
                 final_save_list.append(target_candle)
 
-    return final_save_list, []
+    # Return Result + existing orphan_errors (if any from parsing phase, though usually we skip earlier)
+    return final_save_list, orphan_errors
 
 # --- 🖥 UI ---
 # --- HEADER ---
