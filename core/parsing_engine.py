@@ -619,7 +619,11 @@ def calculate_metrics(raw_data, config):
     # Расчёт финального порога (только если оба значения из БД)
     if base_sens is not None and coeff is not None:
         m['porog_final'] = base_sens * coeff
+    
+    # Epsilon: зона нечувствительности (33% от порога)
         m['epsilon'] = 0.33 * m['porog_final']
+    
+    # OI в пределах чувствительности?
         m['oi_in_sens'] = abs(m['doi_pct'] or 0) <= m['porog_final']
     else:
         # Нет данных в БД — метрики недоступны
