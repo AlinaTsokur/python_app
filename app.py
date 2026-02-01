@@ -323,10 +323,10 @@ def generate_composite_report(candles_list):
 
         if not valid_candles: return None
         
-        subset_vol = sum((get_val(c, 'volume') or 0) for c in valid_candles)
+        subset_vol = sum(get_val(c, 'volume') for c in valid_candles)
         if subset_vol == 0: return None
         
-        return sum(get_val(c, key) * (get_val(c, 'volume') or 0) for c in valid_candles) / subset_vol
+        return sum(get_val(c, key) * get_val(c, 'volume') for c in valid_candles) / subset_vol
 
     # 3. Расчет метрик
     comp = {
@@ -504,7 +504,6 @@ def process_raw_text_batch(raw_text):
     def get_comp_key(r):
         ts = str(r.get('ts', '')).replace('T', ' ')[:16]
         sym = str(r.get('symbol_clean', '')).upper()
-        if sym.endswith('USDT'): sym = sym.replace('USDT', '')
         tf = str(r.get('tf', '')).upper()
         return (ts, sym, tf)
 
