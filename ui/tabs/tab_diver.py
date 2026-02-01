@@ -7,8 +7,8 @@ Tab Diver - UI модуль для анализа дивергенций.
 
 import streamlit as st
 from datetime import datetime
-from parsing_engine import parse_raw_input, calculate_metrics, fmt_num
-import diver_engine
+from core.parsing_engine import parse_raw_input, calculate_metrics, fmt_num
+from core import diver_engine
 
 
 def render(db, processor, config_loader, supabase):

@@ -1,10 +1,24 @@
-"""Report Generator Module - X-Ray and Composite Reports"""
+"""
+Модуль генерации отчётов - X-Ray и Композитные отчёты.
+
+Содержит функции для форматирования метрик свечей в текстовые отчёты.
+"""
 
 from datetime import datetime
 
 
 def fmt_num(val, decimals=2, is_pct=False):
-    """Format number for display."""
+    """
+    Форматирует число для отображения.
+    
+    Аргументы:
+        val: Значение для форматирования
+        decimals: Количество знаков после запятой
+        is_pct: Добавлять знак % в конце
+    
+    Возвращает:
+        Отформатированную строку или "−" если значение None
+    """
     if val is None: return "−"
     if isinstance(val, bool): return "true" if val else "false"
     if isinstance(val, (int, float)):
@@ -15,7 +29,16 @@ def fmt_num(val, decimals=2, is_pct=False):
 
 
 def generate_xray(d):
-    """Generate X-Ray text report from metrics dictionary."""
+    """
+    Генерирует X-Ray текстовый отчёт из словаря метрик свечи.
+    
+    Аргументы:
+        d: Словарь с метриками свечи (open, high, low, close, volume, etc.)
+    
+    Возвращает:
+        Многострочный текстовый отчёт со всеми метриками
+    """
+    # Форматирование временной метки
     if d.get('ts'):
         try:
             ts_obj = datetime.fromisoformat(d['ts'])
@@ -24,28 +47,43 @@ def generate_xray(d):
             ts_str = str(d.get('parsed_ts') or d.get('ts'))
     else:
         ts_str = "No Timestamp"
+    
     dr = d.get('dominant_reject') or "−"
     
+    # Сборка отчёта из блоков метрик
     lines = [
+        # === Базовые данные ===
         f"ts: {ts_str}",
         f"exchange: {d.get('exchange')}",
         f"symbol: {d.get('raw_symbol')}",
         f"tf: {d.get('tf')}",
+        
+        # === OHLC ===
         f"open: {fmt_num(d.get('open'))}",
         f"high: {fmt_num(d.get('high'))}",
         f"low: {fmt_num(d.get('low'))}",
         f"close: {fmt_num(d.get('close'))}",
+        
+        # === Объёмы ===
         f"volume: {fmt_num(d.get('volume'), 0)}",
         f"buy_volume: {fmt_num(d.get('buy_volume'), 0)}",
         f"sell_volume: {fmt_num(d.get('sell_volume'), 0)}",
+        
+        # === Сделки ===
         f"buy_trades: {fmt_num(d.get('buy_trades'), 0)}",
         f"sell_trades: {fmt_num(d.get('sell_trades'), 0)}",
+        
+        # === Open Interest ===
         f"oi_open: {fmt_num(d.get('oi_open'), 0)}",
         f"oi_high: {fmt_num(d.get('oi_high'), 0)}",
         f"oi_low: {fmt_num(d.get('oi_low'), 0)}",
         f"oi_close: {fmt_num(d.get('oi_close'), 0)}",
+        
+        # === Ликвидации ===
         f"liq_long: {fmt_num(d.get('liq_long'), 0)}",
         f"liq_short: {fmt_num(d.get('liq_short'), 0)}",
+        
+        # === Геометрия свечи ===
         f"range: {fmt_num(d.get('range'))}",
         f"body_pct: {fmt_num(d.get('body_pct'), 2, True)}",
         f"clv_pct: {fmt_num(d.get('clv_pct'), 2, True)}",
@@ -53,14 +91,22 @@ def generate_xray(d):
         f"lower_tail_pct: {fmt_num(d.get('lower_tail_pct'), 2, True)}",
         f"price_sign: {d.get('price_sign')}",
         f"dominant_reject: {dr}",
+        
+        # === CVD (Cumulative Volume Delta) ===
         f"cvd_pct: {fmt_num(d.get('cvd_pct'), 2, True)}",
         f"cvd_sign: {d.get('cvd_sign')}",
         f"cvd_small: {fmt_num(d.get('cvd_small'))}",
+        
+        # === Дельта цены ===
         f"dpx: {fmt_num(d.get('dpx'))}",
         f"price_vs_delta: {d.get('price_vs_delta')}",
+        
+        # === Трейды ===
         f"dtrades_pct: {fmt_num(d.get('dtrades_pct'), 2, True)}",
         f"ratio_stable: {fmt_num(d.get('ratio_stable'))}",
         f"tilt_pct: {fmt_num(d.get('tilt_pct'), 2, True)}",
+        
+        # === OI метрики ===
         f"doi_pct: {fmt_num(d.get('doi_pct'), 2, True)}",
         f"oi_in_sens: {fmt_num(d.get('oi_in_sens'))}",
         f"oi_set: {fmt_num(d.get('oi_set'))}",
@@ -69,9 +115,13 @@ def generate_xray(d):
         f"oipos: {fmt_num(d.get('oipos'), 2, True)}",
         f"oi_path: {d.get('oi_path')}",
         f"oe: {fmt_num(d.get('oe'))}",
+        
+        # === Ликвидации (анализ) ===
         f"liqshare_pct: {fmt_num(d.get('liq_share_pct'), 2, True)}",
         f"limb_pct: {fmt_num(d.get('limb_pct'), 2, True)}",
         f"liq_squeeze: {fmt_num(d.get('liq_squeeze'))}",
+        
+        # === Дополнительные метрики ===
         f"range_pct: {fmt_num(d.get('range_pct'), 2, True)}",
         f"implied_price: {fmt_num(d.get('implied_price'))}",
         f"avg_trade_buy: {fmt_num(d.get('avg_trade_buy'))}",
@@ -80,35 +130,47 @@ def generate_xray(d):
     return "\n".join(lines)
 
 
-# Backward compatibility alias
+# Алиас для обратной совместимости
 generate_full_report = generate_xray
 
 
 def generate_composite(candles_list):
     """
-    Calculates volume-weighted composite report for a group of candles.
-    Requires minimum 3 exchanges.
+    Рассчитывает композитный отчёт, взвешенный по объёму, для группы свечей.
+    
+    Аргументы:
+        candles_list: Список свечей с разных бирж (минимум 3)
+    
+    Возвращает:
+        Текстовый отчёт с агрегированными метриками или None если данных мало
     """
     import math
     
     if not candles_list or len(candles_list) < 3:
         return None
 
-    # Thresholds (matching Google Sheets logic)
+    # Пороговые значения (соответствуют логике Google Sheets)
     THRESH = {
-        'CVD': 1.0, 'TR': 0.5, 'TILT': 2.0,
-        'DOI': 0.5, 'LIQ_HIGH': 0.30, 'LIQ_LOW': 0.10
+        'CVD': 1.0,       # Порог значимости CVD
+        'TR': 0.5,        # Порог delta trades
+        'TILT': 2.0,      # Порог перекоса размера сделки
+        'DOI': 0.5,       # Порог delta OI
+        'LIQ_HIGH': 0.30, # Высокая доля ликвидаций
+        'LIQ_LOW': 0.10   # Низкая доля ликвидаций
     }
 
+    # Отчёт о пропущенных данных
     missing_data_report = {}
 
     def get_val(d, key):
+        """Безопасное получение числового значения."""
         v = d.get(key)
         if v is None:
             return None
         return v if (isinstance(v, (int, float)) and not math.isnan(v)) else None
 
     def sign_char(val, thr):
+        """Возвращает символ знака: +, -, 0, ?"""
         if val is None:
             return '?'
         if abs(val) < thr:
@@ -116,6 +178,7 @@ def generate_composite(candles_list):
         return '+' if val > 0 else '-'
 
     def dispersion(values, thr):
+        """Проверяет дисперсию знаков среди значений."""
         valid_vals = [v for v in values if v is not None]
         signs = set()
         for v in valid_vals:
@@ -126,7 +189,7 @@ def generate_composite(candles_list):
         return "смешанный" if (1 in signs and -1 in signs) else "ок"
 
     def weighted(key, metric_name_for_report):
-        """Volume-weighted average with missing data tracking."""
+        """Рассчитывает средневзвешенное по объёму значение метрики."""
         valid_candles = []
         missing_exchanges = []
         
@@ -136,35 +199,41 @@ def generate_composite(candles_list):
             else:
                 missing_exchanges.append(c.get('exchange', 'Unknown'))
         
+        # Отслеживаем биржи с пропущенными данными
         if missing_exchanges:
             missing_data_report[metric_name_for_report] = missing_exchanges
 
         if not valid_candles:
             return None
         
+        # Сумма объёмов для нормализации
         subset_vol = sum(get_val(c, 'volume') or 0 for c in valid_candles)
         if subset_vol == 0:
             return None
         
+        # Взвешенное среднее
         return sum((get_val(c, key) or 0) * (get_val(c, 'volume') or 0) for c in valid_candles) / subset_vol
 
-    # Calculate metrics
+    # === Расчёт композитных метрик ===
     comp = {
-        'cvd':  weighted('cvd_pct', 'CVD'),
-        'tr':   weighted('dtrades_pct', 'Trades'),
-        'tilt': weighted('tilt_pct', 'Tilt'),
-        'doi':  weighted('doi_pct', 'Delta OI'),
-        'liq':  weighted('liq_share_pct', 'Liquidation'),
-        'clv':  weighted('clv_pct', 'CLV'),
+        'cvd':   weighted('cvd_pct', 'CVD'),
+        'tr':    weighted('dtrades_pct', 'Trades'),
+        'tilt':  weighted('tilt_pct', 'Tilt'),
+        'doi':   weighted('doi_pct', 'Delta OI'),
+        'liq':   weighted('liq_share_pct', 'Liquidation'),
+        'clv':   weighted('clv_pct', 'CLV'),
         'upper': weighted('upper_tail_pct', 'Upper Tail'),
         'lower': weighted('lower_tail_pct', 'Lower Tail'),
         'body':  weighted('body_pct', 'Body')
     }
 
     def safe_fmt(val, dec=2):
+        """Безопасное форматирование процента."""
         return f"{val:.{dec}f}%" if val is not None else "—"
 
-    # Interpretations
+    # === Интерпретации метрик ===
+    
+    # Ликвидации
     if comp['liq'] is not None:
         if comp['liq'] > THRESH['LIQ_HIGH']:
             liq_eval = 'ведут ликвидации'
@@ -175,6 +244,7 @@ def generate_composite(candles_list):
     else:
         liq_eval = '—'
 
+    # Перекос размера сделки
     if comp['tilt'] is not None:
         if comp['tilt'] >= THRESH['TILT']:
             tilt_int = 'sell тяжелее'
@@ -185,6 +255,7 @@ def generate_composite(candles_list):
     else:
         tilt_int = '—'
 
+    # CLV (Close Location Value)
     if comp['clv'] is not None:
         if comp['clv'] >= 70:
             clv_int = 'принятие сверху'
@@ -195,7 +266,7 @@ def generate_composite(candles_list):
     else:
         clv_int = '—'
 
-    # Liq Tilt Sums
+    # === Перекос ликвидаций (Long vs Short) ===
     ll_vals = [get_val(c, 'liq_long') for c in candles_list]
     ls_vals = [get_val(c, 'liq_short') for c in candles_list]
     sum_ll = sum(v for v in ll_vals if v is not None)
@@ -204,15 +275,22 @@ def generate_composite(candles_list):
     has_liq_data = any(v is not None for v in ll_vals) or any(v is not None for v in ls_vals)
     
     if has_liq_data:
-        liq_tilt = 'Long доминируют' if sum_ll > sum_ls else ('Short доминируют' if sum_ls > sum_ll else 'сбалансировано')
+        if sum_ll > sum_ls:
+            liq_tilt = 'Long доминируют'
+        elif sum_ls > sum_ll:
+            liq_tilt = 'Short доминируют'
+        else:
+            liq_tilt = 'сбалансировано'
     else:
         liq_tilt = '—'
 
+    # Дисперсия знаков
     disp_cvd = dispersion([get_val(c, 'cvd_pct') for c in candles_list], THRESH['CVD'])
     disp_doi = dispersion([get_val(c, 'doi_pct') for c in candles_list], THRESH['DOI'])
 
-    # Per-exchange details
+    # === Детализация по биржам ===
     def fmt_item(c, key, thr):
+        """Форматирует метрику с биржей и знаком."""
         val = get_val(c, key)
         if val is None:
             return f"{c.get('exchange','?')} —"
@@ -223,10 +301,12 @@ def generate_composite(candles_list):
     per_tr  = "; ".join([fmt_item(c, 'dtrades_pct', THRESH['TR']) for c in candles_list])
     per_doi = "; ".join([fmt_item(c, 'doi_pct', THRESH['DOI']) for c in candles_list])
 
+    # Метаданные
     instr = candles_list[0].get('raw_symbol', 'Unknown')
     tf = candles_list[0].get('tf', '-')
     exchanges_str = ", ".join([c.get('exchange','?') for c in candles_list])
 
+    # === Сборка отчёта ===
     report = f"""КОМПОЗИТНАЯ СВОДКА
 • Инструмент/TF: {instr} / {tf} • Биржи: {len(candles_list)} ({exchanges_str})
 
@@ -249,7 +329,7 @@ def generate_composite(candles_list):
    - Тени: верхняя {safe_fmt(comp['upper'])} / нижняя {safe_fmt(comp['lower'])}
    - Тело: {safe_fmt(comp['body'])}
 """
-    # Warning Section
+    # Секция предупреждений о неполных данных
     if missing_data_report:
         report += "\n⚠️ ВНИМАНИЕ: Неполные данные\n"
         for metric, bad_exchanges in missing_data_report.items():
@@ -258,5 +338,5 @@ def generate_composite(candles_list):
     return report
 
 
-# Backward compatibility alias
+# Алиас для обратной совместимости
 generate_composite_report = generate_composite

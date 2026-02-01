@@ -8,7 +8,7 @@ Tab Levels - UI модуль для расчёта уровней поддерж
 import streamlit as st
 import pandas as pd
 from datetime import timedelta
-import levels_engine
+from core import levels_engine
 
 
 def render(supabase):

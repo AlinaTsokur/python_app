@@ -1,7 +1,7 @@
 """Pipeline Processor Module - Centralized batch processing logic."""
 
 import re
-from parsing_engine import parse_raw_input, calculate_metrics
+from core.parsing_engine import parse_raw_input, calculate_metrics
 from core.report_generator import generate_xray, generate_composite
 
 

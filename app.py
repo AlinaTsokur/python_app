@@ -4,10 +4,10 @@ from datetime import datetime, timedelta
 from supabase import create_client, Client
 import base64
 import os
-import diver_engine
-import levels_engine
-import parsing_engine
-from parsing_engine import parse_value_raw, extract, fmt_num, parse_raw_input, calculate_metrics
+from core import diver_engine
+from core import levels_engine
+from core import parsing_engine
+from core.parsing_engine import parse_value_raw, extract, fmt_num, parse_raw_input, calculate_metrics
 from core.report_generator import generate_xray, generate_composite, generate_full_report, generate_composite_report
 from ui.tabs import tab_reports
 from ui.tabs import tab_candles
@@ -123,7 +123,7 @@ else:
     st.title("🖤 VANTA")
 
 # --- 📍 НАВИГАЦИЯ ---
-import batch_parser
+from core import batch_parser
 from offline import stage1_loader, stage2_features, stage3_bins, stage4_rules, stage5_bins_stats, stage6_mine_stats
 
 TABS = ["Отчеты", "Свечи", "Дивер", "Уровни", "Лаборатория", "Обучение"]

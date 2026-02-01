@@ -7,7 +7,7 @@ Tab Lab - UI модуль для лаборатории загрузки batch-�
 
 import streamlit as st
 import pandas as pd
-import batch_parser
+from core import batch_parser
 
 
 def render(supabase, config_loader):

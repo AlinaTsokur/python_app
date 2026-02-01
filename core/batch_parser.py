@@ -2,7 +2,7 @@ import re
 import math
 from datetime import datetime
 import pandas as pd
-from parsing_engine import parse_raw_input, calculate_metrics
+from core.parsing_engine import parse_raw_input, calculate_metrics
 from core.report_generator import generate_full_report
 
 # --- 3. STATS CALCULATION (Architecture V5) ---
