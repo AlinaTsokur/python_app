@@ -7,17 +7,17 @@ import os
 import diver_engine
 import levels_engine
 import parsing_engine
-# Reloads removed for production cleanliness
 from parsing_engine import parse_value_raw, extract, fmt_num, parse_raw_input, calculate_metrics
 from core.report_generator import generate_xray, generate_composite, generate_full_report, generate_composite_report
 from ui.tabs import tab_reports
 from ui.tabs import tab_candles
 from ui.tabs import tab_diver
 from ui.tabs import tab_levels
+from ui.tabs import tab_lab
 
 # --- Настройка страницы ---
 st.set_page_config(
-    page_title="VANTA Black",
+    page_title="VANTA",
     page_icon="🖤",
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -26,56 +26,54 @@ st.set_page_config(
 # --- 🔌 Подключение к Supabase ---
 @st.cache_resource
 def init_connection():
+    """Инициализация клиента Supabase с приоритетом env-переменных."""
     try:
-        # 1. Try OS Environment Variables (Railway/Production) - Prioritize this!
+        # 1. Приоритет: Environment Variables (Railway/Production)
         url = os.getenv("SUPABASE_URL")
         key = os.getenv("SUPABASE_KEY")
 
-        # 2. Fallback to Streamlit Secrets (Local)
+        # 2. Fallback: Streamlit Secrets (локальная разработка)
         if not url or not key:
             try:
-                # Accessing st.secrets triggers file check, so we wrap it
                 if "SUPABASE_URL" in st.secrets:
                     url = st.secrets["SUPABASE_URL"]
                     key = st.secrets["SUPABASE_KEY"]
             except Exception:
-                pass # secrets.toml missing, that's fine if we have env vars or handle it below
+                pass
 
         if not url or not key:
-            st.error("❌ Credentials missing! Set SUPABASE_URL and SUPABASE_KEY in Environment Variables (Railway) or .streamlit/secrets.toml (Local).")
-            # Don't stop immediately if you want to allow limited functionality, but for now strict:
+            st.error("❌ Не найдены credentials! Установите SUPABASE_URL и SUPABASE_KEY.")
             st.stop()
             
         return create_client(url, key)
     except Exception as e:
-        st.error(f"❌ Connection Error: {e}")
+        st.error(f"❌ Ошибка подключения: {e}")
         st.stop()
 
 supabase: Client = init_connection()
 
-# --- 🗄️ Database Manager Instance ---
+# --- 🗄️ Менеджер БД ---
 from core.db_manager import DatabaseManager
 db = DatabaseManager(supabase)
 
-# --- 🔄 Pipeline Processor Instance ---
+# --- 🔄 Процессор конвейера ---
 from core.pipeline_processor import PipelineProcessor
-# Note: processor initialized after load_configurations is defined
 
-# --- 🎨 CSS: PREMIUM DESIGN ---
+# --- 🎨 Стили CSS ---
 import styles
 styles.apply_styles(st)
 
 # --- ⚙️ Загрузка конфигураций из БД ---
 @st.cache_data(ttl=300)
 def load_configurations():
-    """Загружает параметры чувствительности, коэффициенты и пороги из Supabase."""
+    """Загружает коэффициенты активов, пороги DOI и параметры TF из Supabase."""
     config = {}
     try:
-        # 1. Asset Coeffs (Column: asset, coeff)
+        # Коэффициенты активов
         res_ac = supabase.table('asset_coeffs').select("*").execute()
         config['asset_coeffs'] = {row['asset']: row['coeff'] for row in res_ac.data} if res_ac.data else {}
 
-        # 2. Porog DOI (Column: tf, btc, eth...)
+        # Пороги DOI
         res_porog = supabase.table('porog_doi').select("*").execute()
         if res_porog.data:
             df = pd.DataFrame(res_porog.data)
@@ -85,11 +83,11 @@ def load_configurations():
         else:
             config['porog_doi'] = pd.DataFrame()
 
-        # 3. TF Params (Column: tf, k_set, k_ctr...)
+        # Параметры TF
         res_tf = supabase.table('tf_params').select("*").execute()
         config['tf_params'] = {row['tf']: row for row in res_tf.data} if res_tf.data else {}
 
-        # 4. Liqshare Thresholds
+        # Порог squeeze
         res_liq = supabase.table('liqshare_thresholds').select("*").eq('name', 'squeeze').execute()
         config['global_squeeze_limit'] = float(res_liq.data[0]['value']) if res_liq.data else 0.3
 
@@ -98,30 +96,11 @@ def load_configurations():
         st.error(f"Ошибка загрузки конфигураций из БД: {e}")
         return {}
 
-# --- 🔄 Pipeline Processor Instance ---
+# Инициализация процессора
 processor = PipelineProcessor(db, load_configurations)
 
 
-# --- 🛠 Хелперы Парсинга ---
-# MOVED TO parsing_engine.py
-# (Imports added at top)
-
-# --- 🧠 ЯДРО: 1. RAW INPUT PARSING (ИСПРАВЛЕНО) ---
-# MOVED TO parsing_engine.py
-
-# --- 🧠 ЯДРО: 2. CALCULATED METRICS ---
-# MOVED TO parsing_engine.py
-
-# --- 💾 БД ---
-# MOVED TO core/db_manager.py (DatabaseManager class)
-
-
-# --- HELPER: CENTRALIZED BATCH PROCESSING ---
-# MOVED TO core/pipeline_processor.py (PipelineProcessor class)
-
-
-# --- 🖥 UI ---
-# --- HEADER ---
+# --- �️ ИНТЕРФЕЙС ---
 def get_base64_image(image_path):
     with open(image_path, "rb") as f:
         data = f.read()
@@ -130,8 +109,6 @@ def get_base64_image(image_path):
 logo_path = "assets/logo.png"
 if os.path.exists(logo_path):
     img_b64 = get_base64_image(logo_path)
-    # Flex container to align image and text. 
-    # adjust height via max-height or height in css. vanta text is usually h1.
     st.markdown(
         f"""
         <div style="display: flex; align-items: center; gap: 10px;">
@@ -144,25 +121,22 @@ if os.path.exists(logo_path):
 else:
     st.title("🖤 VANTA")
 
-# --- NAVIGATION LOGIC ---
+# --- 📍 НАВИГАЦИЯ ---
 import batch_parser
 from offline import stage1_loader, stage2_features, stage3_bins, stage4_rules, stage5_bins_stats, stage6_mine_stats
 
-
 TABS = ["Отчеты", "Свечи", "Дивер", "Уровни", "Лаборатория", "Обучение"]
 
-# 1. Get current tab from URL or Session State
+# Получаем текущую вкладку из URL
 query_params = st.query_params
 default_tab = TABS[0]
 
-# Check if 'tab' is in query params
 if "tab" in query_params:
     qp_tab = query_params["tab"]
     if qp_tab in TABS:
         default_tab = qp_tab
 
-# 2. Render Navigation (Radio as Tabs)
-# Use a callback to update URL immediately on change
+# Callback для обновления URL при смене вкладки
 def on_tab_change():
     st.query_params["tab"] = st.session_state.nav_radio
 
@@ -176,10 +150,10 @@ selected_tab = st.radio(
     on_change=on_tab_change
 )
 
-# === HELPER FUNCTIONS ===
+# === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
 
 def _display_found_rules(symbol, tf, exchange):
-    """Display found rules in a nice summary table."""
+    """Отображает найденные паттерны в удобном виде."""
     import json
     from pathlib import Path
     
@@ -204,7 +178,7 @@ def _display_found_rules(symbol, tf, exchange):
     st.divider()
     st.subheader("📊 Найденные паттерны")
     
-    # Meta info with tooltips
+    # Метаданные
     cols = st.columns(5)
     cols[0].metric(
         "N сетапов", 
@@ -232,7 +206,7 @@ def _display_found_rules(symbol, tf, exchange):
         help="Базовая вероятность роста (% сетапов с y_dir=UP)"
     )
     
-    # Rules table
+    # Таблица правил
     for i, rule in enumerate(rules):
         pattern_str = " → ".join(rule.get("pattern", []))
         direction = "🔻 DOWN" if rule.get("edge_down", 0) > rule.get("edge_up", 0) else "🔺 UP"
@@ -372,92 +346,9 @@ if selected_tab == "Дивер":
     tab_diver.render(db, processor, load_configurations, supabase)
 
 
-# ==============================================================================
-# TAB 4: LEVELS (УРОВНИ)
-# ==============================================================================
 if selected_tab == "Уровни":
     tab_levels.render(supabase)
 
 
-# ==============================================================================
-# TAB 5: ЛАБОРАТОРИЯ
-# ==============================================================================
 if selected_tab == "Лаборатория":
-    # Text Area
-    lab_text = st.text_area("Batch Input", label_visibility="collapsed", height=300, key="lab_text_area", placeholder="Вставьте свечи и метки (Strong Up/Down)...")
-    
-    # Action Columns
-    col_lab_parse, col_lab_save, col_lab_status = st.columns([1, 3, 7])
-    
-    with col_lab_parse:
-        if st.button("🐾 ", type="primary"):
-            if not lab_text.strip():
-                st.warning("Введите текст.")
-            else:
-                # Load config to ensure calculate_metrics works fully
-                lab_config = load_configurations()
-                st.session_state['lab_segments'], st.session_state['lab_candles'], st.session_state['lab_warnings'] = batch_parser.parse_batch_with_labels(lab_text, config=lab_config)
-                st.session_state['lab_checked'] = True
-                st.rerun()
-
-    # Results Display
-    if st.session_state.get('lab_checked'):
-        st.divider()
-        warnings = st.session_state.get('lab_warnings', [])
-        segments = st.session_state.get('lab_segments', [])
-        candles = st.session_state.get('lab_candles', [])
-        
-        # 1. Warnings (Critical)
-        if warnings:
-            st.error(f"⚠️ ОБНАРУЖЕНО {len(warnings)} ПРОБЛЕМ")
-            for w in warnings:
-                st.markdown(f"- {w}")
-            st.warning("Рекомендуем исправить текст перед загрузкой, иначе проблемные сегменты будут пропущены.")
-        
-        # 2. Stats
-        st.write(f"**Найдено свечей:** {len(candles)}")
-        
-        # 3. Segments Table
-        if segments:
-            # Display Segments Table
-            seg_data = []
-            for i, s in enumerate(segments): # Changed parsed_batch to segments
-                meta = s['META']
-                stats = s['CONTEXT']['STATS']
-                imp = s['IMPULSE']
-                
-                row = {
-                    "Symbol": meta.get('symbol', 'Unknown'), # Changed raw_symbol to symbol
-                    "TF": meta.get('tf', 'Unknown'),
-                    "Direction": imp.get('y_dir'), # "UP" / "DOWN"
-                    "Strength": imp.get('y_size'), # "Weak" / "Medium" / "Strong"
-                    "Candles": stats.get('candles_count'),
-                    "Vol (M)": f"{stats.get('sum_volume', 0)/1_000_000:.2f}M",
-                    "Liq Ratio": stats.get('liq_dominance_ratio')
-                }
-                seg_data.append(row)
-            
-            # Display Table
-            if seg_data:
-                st.dataframe(pd.DataFrame(seg_data), use_container_width=True)
-            
-            # Save Button (Only if segments exist)
-            with col_lab_save:
-                # Transactional Save
-                if st.button(f"💾 Загрузить {len(segments)} сегментов в БД", type="primary"):
-                    with st.spinner("Тотальная запись (Транзакция)..."):
-                        try:
-                            s_count, c_count = batch_parser.save_batch_transactionally(supabase, segments, candles)
-                            with col_lab_status:
-                                st.success(f"✅ УСПЕХ! Записано: {s_count} сегментов, {c_count} свечей.")
-                            st.balloons()
-                            # Clear state
-                            st.session_state['lab_checked'] = False
-                            st.session_state['lab_segments'] = []
-                        except Exception as e:
-                            st.error(f"❌ ОШИБКА ЗАПИСИ: {e}")
-                            st.error("Транзакция отменена. Данные откатились (Rollback). База чиста.")
-        else:
-            st.info("Валидных сегментов не найдено.")
-
-
+    tab_lab.render(supabase, load_configurations)
