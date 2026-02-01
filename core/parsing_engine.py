@@ -632,8 +632,11 @@ def calculate_metrics(raw_data, config):
         m['oi_in_sens'] = None
     
     # Коэффициенты для SET/COUNTER/UNLOAD
-    k_set, k_ctr, k_unl = 1.0, 1.0, 1.0
-    tf_sens_base = None 
+    # СТРОГИЙ РЕЖИМ: все должны быть в tf_params
+    k_set = None
+    k_ctr = None
+    k_unl = None
+    tf_sens_base = None
     
     # Поиск параметров таймфрейма
     tf_data = tf_params.get(tf_val)
@@ -643,15 +646,19 @@ def calculate_metrics(raw_data, config):
                 tf_data = v_data
                 break
     
+    # Получение параметров из tf_data (строгий режим)
     if tf_data:
-        k_set = float(tf_data.get('k_set', 1.0))
-        k_ctr = float(tf_data.get('k_ctr', 1.0))
-        k_unl = float(tf_data.get('k_unl', 1.0))
+        # Все параметры должны быть явно указаны в БД
+        k_set = float(tf_data['k_set']) if 'k_set' in tf_data else None
+        k_ctr = float(tf_data['k_ctr']) if 'k_ctr' in tf_data else None
+        k_unl = float(tf_data['k_unl']) if 'k_unl' in tf_data else None
+        
         if 'sens' in tf_data:
             tf_sens_base = float(tf_data['sens'])
 
-    if tf_sens_base is not None:
-        t_base = tf_sens_base 
+
+    if tf_sens_base is not None and k_set is not None and k_ctr is not None and k_unl is not None:
+        t_base = tf_sens_base
         
         # OI SET: набор позиций (OI растёт выше порога)
         m['t_set_pct'] = round(t_base * k_set, 2)
