@@ -108,7 +108,7 @@ def render(db, processor):
                 
                 # Предупреждение о пропущенных полях (если есть)
                 if full_data.get('missing_fields'):
-                    st.warning(f"⚠️ Отсутствуют данные: {', '.join(full_data['missing_fields'])}.\nЗначения заменены на 0, чтобы расчеты не упали.")
+                    st.warning(f"⚠️ Отсутствуют данные: {', '.join(full_data['missing_fields'])}. Метрики на основе этих полей не рассчитаны.")
                 
                 # Контейнер с фиксированной высотой для отчётов
                 with st.container(height=300):

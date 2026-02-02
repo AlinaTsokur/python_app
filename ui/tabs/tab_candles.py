@@ -75,6 +75,10 @@ def render(db):
         
         # Конвертируем timestamp
         df['ts'] = pd.to_datetime(df['ts'], errors='coerce')
+        
+        # Очищаем None в колонке note → пустая строка
+        if 'note' in df.columns:
+            df['note'] = df['note'].fillna('').replace('None', '')
 
         # === СЕКЦИЯ 3: ПАНЕЛЬ УПРАВЛЕНИЯ ===
         c1, c2, c3 = st.columns([0.2, 0.2, 0.6], vertical_alignment="bottom")

@@ -80,6 +80,13 @@ class PipelineProcessor:
         for raw_data in final_batch_list:
             full_data = calculate_metrics(raw_data, config)
             
+            # Если есть пропущенные поля — записываем в note
+            if full_data.get('missing_fields'):
+                missing_note = f"⚠️ Missing: {', '.join(full_data['missing_fields'])}"
+                existing_note = full_data.get('note') or ''
+                if missing_note not in existing_note:
+                    full_data['note'] = (existing_note + ' ' + missing_note).strip()
+            
             has_main = raw_data.get('buy_volume', 0) != 0
             if has_main:
                 full_data['x_ray'] = generate_xray(full_data)
