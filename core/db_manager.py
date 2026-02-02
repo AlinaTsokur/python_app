@@ -65,7 +65,7 @@ class DatabaseManager:
         
         raise Exception("Failed to save after max attempts removing columns")
     
-    def load_candles(self, limit=100, start_date=None, end_date=None, tfs=None):
+    def load_candles(self, limit=100, start_date=None, end_date=None, tfs=None, symbols=None):
         """
         Load candles from database with optional filters.
         Returns pandas DataFrame.
@@ -84,8 +84,20 @@ class DatabaseManager:
             tfs_extended = list(set(tfs + [t.upper() for t in tfs] + [t.lower() for t in tfs]))
             query = query.in_('tf', tfs_extended)
         
+        if symbols and len(symbols) > 0:
+            # Фильтр по символам (активам) - используем symbol_clean
+            query = query.in_('symbol_clean', symbols)
+        
         res = query.limit(limit).execute()
         return pd.DataFrame(res.data) if res.data else pd.DataFrame()
+    
+    def get_unique_symbols(self):
+        """Получить список уникальных символов (активов) из БД."""
+        res = self.supabase.table('candles').select('symbol_clean').execute()
+        if res.data:
+            symbols = list(set(row['symbol_clean'] for row in res.data if row.get('symbol_clean')))
+            return sorted(symbols)
+        return []
     
     def delete_candles(self, ids):
         """Delete candles by IDs."""

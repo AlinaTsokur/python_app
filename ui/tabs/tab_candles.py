@@ -18,8 +18,8 @@ def render(db):
     """
     
     # === СЕКЦИЯ 1: ФИЛЬТРЫ ===
-    # Панель фильтров: TF | Даты | Лимит записей
-    f1, f2, f3 = st.columns([2, 2, 1])
+    # Панель фильтров: TF | Актив | Даты | Лимит записей
+    f1, f2, f3, f4 = st.columns([2, 2, 2, 1])
     
     with f1:
         # Мультиселект таймфреймов
@@ -31,8 +31,19 @@ def render(db):
             placeholder="Все TF", 
             label_visibility="collapsed"
         )
-        
+    
     with f2:
+        # Мультиселект активов (из БД)
+        all_symbols = db.get_unique_symbols()
+        selected_symbols = st.multiselect(
+            "Активы",
+            all_symbols,
+            default=[],
+            placeholder="Все активы",
+            label_visibility="collapsed"
+        )
+        
+    with f3:
         # Выбор диапазона дат
         date_range = st.date_input("Период", value=[], label_visibility="collapsed")
         start_d, end_d = None, None
@@ -41,7 +52,7 @@ def render(db):
         elif len(date_range) == 1:
             start_d = date_range[0]
             
-    with f3:
+    with f4:
         # Лимит количества записей
         limit_rows = st.number_input(
             "Limit", 
@@ -52,7 +63,7 @@ def render(db):
         )
 
     # === СЕКЦИЯ 2: ЗАГРУЗКА ДАННЫХ ===
-    df = db.load_candles(limit=limit_rows, start_date=start_d, end_date=end_d, tfs=selected_tfs)
+    df = db.load_candles(limit=limit_rows, start_date=start_d, end_date=end_d, tfs=selected_tfs, symbols=selected_symbols)
 
     if not df.empty:
         # Добавляем колонку note если её нет
@@ -124,7 +135,7 @@ def render(db):
                 df['delete'] = True
 
         # === СЕКЦИЯ 4: ТАБЛИЦА ДАННЫХ ===
-        visible_cols = ['ts', 'tf', 'x_ray', 'x_ray_composite', 'report_diver', 'note', 'raw_data']
+        visible_cols = ['ts', 'tf', 'x_ray', 'x_ray_composite', 'note', 'raw_data']
         
         edited_df = st.data_editor(
             df,
