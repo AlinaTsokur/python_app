@@ -11,6 +11,7 @@ from core.parsing_engine import parse_value_raw, extract, fmt_num, parse_raw_inp
 from core.report_generator import generate_xray, generate_composite, generate_full_report, generate_composite_report
 from ui.tabs import tab_reports
 from ui.tabs import tab_candles
+from ui.tabs import tab_flow
 from ui.tabs import tab_diver
 from ui.tabs import tab_levels
 from ui.tabs import tab_lab
@@ -101,7 +102,7 @@ def load_configurations():
 processor = PipelineProcessor(db, load_configurations)
 
 
-# --- �️ ИНТЕРФЕЙС ---
+# --- 🖥️ ИНТЕРФЕЙС ---
 def get_base64_image(image_path):
     with open(image_path, "rb") as f:
         data = f.read()
@@ -126,7 +127,9 @@ else:
 from core import batch_parser
 from offline import stage1_loader, stage2_features, stage3_bins, stage4_rules, stage5_bins_stats, stage6_mine_stats
 
-TABS = ["Отчеты", "Свечи", "Дивер", "Уровни", "Лаборатория", "Обучение"]
+# Активные и временно отключённые вкладки
+TABS = ["Отчеты", "Поток", "Свечи", "Дивер", "Уровни", "Лаборатория", "Обучение"]
+DISABLED_TABS = ["Дивер", "Уровни", "Лаборатория", "Обучение"]
 
 # Получаем текущую вкладку из URL
 query_params = st.query_params
@@ -151,24 +154,21 @@ selected_tab = st.radio(
     on_change=on_tab_change
 )
 
-if selected_tab == "Отчеты":
+# --- РЕНДЕРИНГ ВКЛАДОК ---
+if selected_tab in DISABLED_TABS:
+    st.warning(f"🚧 Вкладка **{selected_tab}** временно отключена")
+elif selected_tab == "Отчеты":
     tab_reports.render(db, processor)
-
-
-if selected_tab == "Свечи":
+elif selected_tab == "Поток":
+    tab_flow.render()
+elif selected_tab == "Свечи":
     tab_candles.render(db)
-
-
-if selected_tab == "Дивер":
+elif selected_tab == "Дивер":
     tab_diver.render(db, processor, load_configurations, supabase)
-
-
-if selected_tab == "Уровни":
+elif selected_tab == "Уровни":
     tab_levels.render(supabase)
-
-if selected_tab == "Лаборатория":
+elif selected_tab == "Лаборатория":
     tab_lab.render(supabase, load_configurations)
-
-
-if selected_tab == "Обучение":
+elif selected_tab == "Обучение":
     tab_training.render()
+

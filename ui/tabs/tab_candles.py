@@ -147,9 +147,8 @@ def render(db):
             column_config={
                 "delete": st.column_config.CheckboxColumn("🗑", default=False, width=30),
                 "ts": st.column_config.DatetimeColumn("Time", format="DD.MM.YYYY HH:mm", width="small"),
-                "x_ray": st.column_config.TextColumn("X-RAY", width="small"),
-                "x_ray_composite": st.column_config.TextColumn("Composite", width="small"),
-                "report_diver": st.column_config.TextColumn("Diver", width="small"),
+                "x_ray": st.column_config.TextColumn("X-RAY", width="medium"),
+                "x_ray_composite": st.column_config.TextColumn("Composite", width="medium"),
                 "note": st.column_config.TextColumn("Note ✏️", width="small"),
                 "raw_data": st.column_config.TextColumn("Raw", width="medium"),
             }
