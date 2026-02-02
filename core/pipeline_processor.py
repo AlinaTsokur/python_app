@@ -82,10 +82,21 @@ class PipelineProcessor:
             
             # Если есть пропущенные поля — записываем в note
             if full_data.get('missing_fields'):
-                missing_note = f"⚠️ Missing: {', '.join(full_data['missing_fields'])}"
+                missing_note = f"⚠️ Нет данных: {', '.join(full_data['missing_fields'])}"
                 existing_note = full_data.get('note') or ''
                 if missing_note not in existing_note:
                     full_data['note'] = (existing_note + ' ' + missing_note).strip()
+            
+            # Если есть дивергенция — записываем в note
+            if full_data.get('price_vs_delta') == 'div':
+                price_sign = full_data.get('price_sign', 0)
+                delta_sign = full_data.get('cvd_sign', 0)
+                price_arrow = '↑' if price_sign > 0 else '↓'
+                delta_arrow = '↑' if delta_sign > 0 else '↓'
+                diver_note = f"⚠️ ДИВЕР: цена {price_arrow} дельта {delta_arrow}"
+                existing_note = full_data.get('note') or ''
+                if diver_note not in existing_note:
+                    full_data['note'] = (existing_note + ' ' + diver_note).strip()
             
             has_main = raw_data.get('buy_volume', 0) != 0
             if has_main:
