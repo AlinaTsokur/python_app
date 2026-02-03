@@ -98,11 +98,8 @@ class PipelineProcessor:
                 if diver_note not in existing_note:
                     full_data['note'] = (existing_note + ' ' + diver_note).strip()
             
-            has_main = raw_data.get('buy_volume', 0) != 0
-            if has_main:
-                full_data['x_ray'] = generate_xray(full_data)
-            else:
-                full_data['x_ray'] = None
+            # Генерируем X-RAY отчёт для всех свечей
+            full_data['x_ray'] = generate_xray(full_data)
             
             temp_all_candles.append(full_data)
         

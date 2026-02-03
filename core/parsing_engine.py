@@ -223,13 +223,21 @@ def parse_raw_input(text):
     data['abv_delta'] = extract(r'Active Buy/Sell Volume.*?Delta\s+([+\-]?[\d,.]+[MKB]?)', text)
     data['abv_ratio'] = extract(r'Active Buy/Sell Volume.*?Ratio\s+([+\-]?[\d,.]+)', text)
     
+    # Fallback: если Delta не распарсилась, считаем из Buy - Sell
+    if data['abv_delta'] is None and data['buy_volume'] is not None and data['sell_volume'] is not None:
+        data['abv_delta'] = data['buy_volume'] - data['sell_volume']
+    
     # === СДЕЛКИ (Buy/Sell Trades) ===
     data['buy_trades'] = extract(r'Active Buy/Sell Trades.*?Buy ([+\-]?[\d,.]+[MKB]?)', text)
     data['sell_trades'] = extract(r'Active Buy/Sell Trades.*?Sell ([+\-]?[\d,.]+[MKB]?)', text)
     if data['sell_trades'] is not None: 
         data['sell_trades'] = abs(data['sell_trades'])
-    data['trades_delta'] = extract(r'Active Buy/Sell Trades.*?Delta ([+\-]?[\d,.]+[MKB]?)', text)
-    data['trades_ratio'] = extract(r'Active Buy/Sell Trades.*?Ratio ([+\-]?[\d,.]+)', text)
+    data['trades_delta'] = extract(r'Active Buy/Sell Trades.*?Delta\s+([+\-]?[\d,.]+[MKB]?)', text)
+    data['trades_ratio'] = extract(r'Active Buy/Sell Trades.*?Ratio\s+([+\-]?[\d,.]+)', text)
+    
+    # Fallback: если trades_delta не распарсилась, считаем из Buy - Sell
+    if data['trades_delta'] is None and data['buy_trades'] is not None and data['sell_trades'] is not None:
+        data['trades_delta'] = data['buy_trades'] - data['sell_trades']
 
     # === OPEN INTEREST ===
     oi_match = re.search(
@@ -456,9 +464,15 @@ def calculate_metrics(raw_data, config):
         m['dtrades_pct'] = None
     
     # ratio_stable: True если знаки объёма и трейдов совпадают
-    sign_abv = (m.get('abv_delta', 0) > 0) - (m.get('abv_delta', 0) < 0)
-    sign_trades = (m.get('trades_delta', 0) > 0) - (m.get('trades_delta', 0) < 0)
-    m['ratio_stable'] = (sign_abv == sign_trades)
+    # Если данных нет — не считаем (None)
+    abv_delta_val = m.get('abv_delta')
+    trades_delta_val = m.get('trades_delta')
+    if abv_delta_val is not None and trades_delta_val is not None:
+        sign_abv = (abv_delta_val > 0) - (abv_delta_val < 0)
+        sign_trades = (trades_delta_val > 0) - (trades_delta_val < 0)
+        m['ratio_stable'] = (sign_abv == sign_trades)
+    else:
+        m['ratio_stable'] = None
 
     # Средний размер сделки (объём / кол-во сделок)
     m['avg_trade_buy'] = (m.get('buy_volume') / b_trades) if (m.get('buy_volume') is not None and b_trades) else None
