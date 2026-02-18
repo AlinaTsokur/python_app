@@ -160,7 +160,7 @@ if selected_tab in DISABLED_TABS:
 elif selected_tab == "Отчеты":
     tab_reports.render(db, processor)
 elif selected_tab == "Поток":
-    tab_flow.render()
+    tab_flow.render(db)
 elif selected_tab == "Свечи":
     tab_candles.render(db)
 elif selected_tab == "Дивер":

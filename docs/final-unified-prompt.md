@@ -130,10 +130,9 @@ def fetch_candles(symbol: str, exchange: str, start_ts: str, end_ts: str,
     
     Args:
         symbol: Тикер (например, 'ETHUSDT')
-        exchange: Биржа ('binance', 'bybit') — ОБЯЗАТЕЛЬНО
         start_ts: Начало периода (ISO8601 UTC)
         end_ts: Конец периода (ISO8601 UTC)
-        limit: Максимум свечей (рекомендуется 500+ для смешанных TF)
+
     
     Returns:
         List[Dict]: Свечи в хронологическом порядке, поле 'tf' содержит таймфрейм.

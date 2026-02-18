@@ -87,7 +87,6 @@ class DatabaseManager:
         if symbols and len(symbols) > 0:
             # Фильтр по символам (активам) - используем symbol_clean
             query = query.in_('symbol_clean', symbols)
-        
         res = query.limit(limit).execute()
         return pd.DataFrame(res.data) if res.data else pd.DataFrame()
     
